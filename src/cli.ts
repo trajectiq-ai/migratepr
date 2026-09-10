@@ -2,6 +2,7 @@
 import * as fs from 'fs';
 import { migrate } from './migrate';
 import { TRACKS } from './rules';
+import { watchCycle, watchLoop, WatchRepo, WatchResult } from './watch';
 import { bold, cyan, dim, green, red, yellow } from './ansi';
 
 /** Exit codes (stable contract for CI): */
@@ -88,6 +89,7 @@ function usage(): void {
 
 Usage:
   migratepr --repo <path> [options]
+  migratepr watch --repo <path> [options]   # self-maintaining loop
 
 Flags:
   --repo <path>        Target repository (default: .)
@@ -118,9 +120,13 @@ Exit codes:
 }
 
 async function main(): Promise<number> {
+  const argv = process.argv.slice(2);
+  if (argv[0] === 'watch') {
+    return runWatch(argv.slice(1));
+  }
   let args: ParsedArgs;
   try {
-    args = parseArgs(process.argv.slice(2));
+    args = parseArgs(argv);
   } catch (err) {
     console.error(red((err as Error).message));
     usage();
@@ -238,6 +244,136 @@ function statusColored(status: string): string {
   if (status === 'migrated') return green(status);
   if (status === 'diff-review') return yellow(status);
   return red(status);
+}
+
+/* ------------------------------- watch mode ------------------------------- */
+
+interface WatchArgs {
+  repos: WatchRepo[];
+  intervalSeconds: number;
+  once: boolean;
+  push: boolean;
+  json: boolean;
+  help: boolean;
+}
+
+function parseWatchArgs(argv: string[]): WatchArgs {
+  const parsed: WatchArgs = { repos: [], intervalSeconds: 3600, once: false, push: false, json: false, help: false };
+  const needValue = (flag: string): string => {
+    const v = argv[++i];
+    if (v === undefined) throw new Error(`missing value for ${flag}`);
+    return v;
+  };
+  let i = 0;
+  for (; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--repo' || a === '--repos') parsed.repos.push({ repoPath: needValue(a) });
+    else if (a === '--track') {
+      if (parsed.repos.length === 0) parsed.repos.push({ repoPath: '.' });
+      parsed.repos[parsed.repos.length - 1].trackId = needValue(a);
+    } else if (a === '--engine') {
+      const v = needValue(a);
+      if (!['rules', 'llm', 'auto'].includes(v)) throw new Error(`--engine must be one of: rules, llm, auto`);
+      if (parsed.repos.length === 0) parsed.repos.push({ repoPath: '.' });
+      parsed.repos[parsed.repos.length - 1].engine = v as WatchRepo['engine'];
+    } else if (a === '--exclude') {
+      if (parsed.repos.length === 0) parsed.repos.push({ repoPath: '.' });
+      (parsed.repos[parsed.repos.length - 1].excludes ??= []).push(needValue(a));
+    } else if (a === '--pr-base') {
+      if (parsed.repos.length === 0) parsed.repos.push({ repoPath: '.' });
+      parsed.repos[parsed.repos.length - 1].prBase = needValue(a);
+    } else if (a === '--interval') {
+      const v = Number(needValue(a));
+      if (!Number.isFinite(v) || v <= 0) throw new Error('--interval must be a positive number of seconds');
+      parsed.intervalSeconds = v;
+    } else if (a === '--once') parsed.once = true;
+    else if (a === '--push') parsed.push = true;
+    else if (a === '--json') parsed.json = true;
+    else if (a === '--help' || a === '-h') parsed.help = true;
+    else throw new Error(`unknown watch flag: ${a}`);
+  }
+  if (parsed.repos.length === 0) throw new Error('watch needs at least one --repo <path>');
+  return parsed;
+}
+
+function watchUsage(): void {
+  console.log(`migratepr v${VERSION} — self-maintaining watch mode
+
+Usage:
+  migratepr watch --repo <path> [--repo <path> ...] [options]
+
+Watches repositories for migration-relevant changes (SDK pin or call sites
+moving) and runs the full detect → rewrite → verify → deliver pipeline only
+when something actually changed. Unchanged repos are skipped via a persisted
+fingerprint (data/watch.json), so the loop never re-opens duplicate PRs.
+
+Flags:
+  --repo <path>      Repo to watch (repeatable)
+  --track <id>       Migration track for the last --repo (default: auto-detect)
+  --engine <mode>    rules | llm | auto for the last --repo (default: auto)
+  --exclude <glob>   Exclude glob for the last --repo (repeatable)
+  --pr-base <branch> PR base branch for the last --repo
+  --interval <sec>   Loop interval (default: 3600). 0 runs once.
+  --once             Run a single cycle and exit (same as --interval 0)
+  --push             Open real PRs (requires clean git tree + gh auth)
+  --json             Machine-readable per-cycle output
+  -h, --help         Show this help
+
+Example:
+  migratepr watch --repo . --repo ../other-app --interval 3600
+`);
+}
+
+async function runWatch(argv: string[]): Promise<number> {
+  let args: WatchArgs;
+  try {
+    args = parseWatchArgs(argv);
+  } catch (err) {
+    console.error(red((err as Error).message));
+    watchUsage();
+    return EXIT.USAGE;
+  }
+  if (args.help) return watchUsage(), EXIT.OK;
+
+  const opts = {
+    repos: args.repos,
+    intervalSeconds: args.once ? 0 : args.intervalSeconds,
+    push: args.push,
+  };
+
+  const onCycle = (results: WatchResult[]): void => {
+    if (args.json) {
+      console.log(JSON.stringify(results));
+      return;
+    }
+    console.log(bold('MigratePR watch — ' + new Date().toISOString()));
+    for (const r of results) {
+      const state = r.skipped
+        ? dim('unchanged')
+        : r.outcome === 'migrated'
+          ? green('migrated')
+          : r.outcome === 'error'
+            ? red('error')
+            : yellow(r.outcome);
+      console.log(
+        `  ${r.repoPath}: ${state}` +
+          (r.findings !== undefined ? dim(` (${r.findings} findings, ${r.rewrites} rewrites)`) : '') +
+          (r.prUrl ? dim(` → ${r.prUrl}`) : ''),
+      );
+      if (r.message && !r.skipped) console.log(dim(`    ${r.message}`));
+    }
+  };
+
+  if (opts.intervalSeconds === 0) {
+    onCycle(await watchCycle(opts));
+    return EXIT.OK;
+  }
+
+  console.log(
+    dim(`watching ${args.repos.length} repo(s) every ${opts.intervalSeconds}s — Ctrl+C to stop`),
+  );
+  await watchLoop(opts, onCycle);
+  return EXIT.OK;
 }
 
 main()

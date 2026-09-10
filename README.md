@@ -49,6 +49,37 @@ migratepr --repo path/to/repo --push
 
 Track auto-detection: `stripe@^12` in `package.json` → the `stripe-v12-to-v13` track. `migratepr --list-tracks` shows all supported upgrade paths.
 
+## Self-maintaining watch (keep repos migrated automatically)
+
+`migratepr watch` is the loop that makes the product's name true: it watches one
+or more repos and runs the full pipeline **only when something actually changed**
+— a new call site, a downgraded SDK pin, a reverted migration. Unchanged repos
+are skipped via a persisted fingerprint (`data/watch.json`), so the loop never
+re-opens duplicate PRs and never re-runs failing migrations against the same
+code.
+
+```bash
+# One cycle now (useful for cron)
+migratepr watch --repo path/to/repo --once
+
+# Loop forever, checking every hour (dry-run: prints PR payloads)
+migratepr watch --repo path/to/repo --interval 3600
+
+# Multiple repos + real delivery (clean git tree + gh auth required)
+migratepr watch --repo app-a --repo app-b --push --interval 86400
+```
+
+Every cycle prints one line per repo: `migrated (n findings, m rewrites)`,
+`unchanged`, `aborted`, or `error`. After a `--push` cycle the repo stays
+"delivered" (PR URL recorded) until its code changes again — merge the PR and
+the loop resumes watching normally.
+
+**Hosted version (no local machine needed):** copy
+[`examples/watch-workflow.yml`](examples/watch-workflow.yml) into your repo as
+`.github/workflows/migratepr-watch.yml`. It runs daily on GitHub Actions, skips
+when a migration PR is already open, and opens the next PR with `GITHUB_TOKEN`
+— zero extra secrets for public repos.
+
 ## Web app (register · login · run migrations · manage AI keys)
 
 MigratePR ships with a zero-dependency web UI on top of the same engine:

@@ -1,0 +1,54 @@
+# Self-maintaining migration workflow — copy this file into YOUR repo at
+# .github/workflows/migratepr-watch.yml
+#
+# Runs MigratePR on a schedule (and on demand via workflow_dispatch). When a
+# migration is needed it rewrites your code, verifies it against your test
+# suite, and opens a ready-to-review PR. Unchanged repos produce no PR, so
+# this can run daily with zero noise.
+#
+# Requirements: the action must run on a checkout of your repo; push uses
+# GITHUB_TOKEN (no extra secrets needed for public repos).
+name: MigratePR watch
+
+on:
+  schedule:
+    # Daily at 03:00 UTC — tune to your team's rhythm.
+    - cron: '0 3 * * *'
+  workflow_dispatch: # allow manual "Run workflow" from the Actions tab
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Skip when a migration PR is already open (the watch loop must not
+      # pile up duplicates). The PR branch is deleted on merge, so the next
+      # daily run resumes watching normally.
+      - name: Skip if a migration PR is open
+        id: guard
+        shell: bash
+        run: |
+          if git ls-remote --exit-code origin "refs/heads/migratepr/*" > /dev/null 2>&1; then
+            echo "migratepr branch already exists — a PR is open; skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run MigratePR (test-verified migration PR)
+        if: steps.guard.outputs.skip != 'true'
+        uses: trajectiq-ai/migratepr@v1
+        with:
+          repo: '.'
+          engine: 'auto' # rules first; add a provider key in repo secrets for LLM
+          push: 'true'   # opens the PR; tests must pass or nothing is pushed
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          # pr-base: 'main'   # default: the branch the job started on
+          # exclude: |
+          #   generated/
