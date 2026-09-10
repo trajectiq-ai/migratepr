@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
+import { KeyProvider, providerMeta } from './providers';
 
 /**
  * Web-app auth + secrets storage. Zero dependencies: Node crypto only.
@@ -27,7 +28,7 @@ export interface SessionRecord {
   expiresAt: string;
 }
 
-export type KeyProvider = 'anthropic' | 'openai';
+export type { KeyProvider } from './providers';
 
 export interface ApiKeyRecord {
   id: string;
@@ -246,13 +247,14 @@ export function saveApiKey(
   label: string,
 ): ApiKeyRecord {
   const key = rawKey.trim();
-  if (provider === 'anthropic' && !key.startsWith('sk-ant-')) {
-    throw new AuthError('Anthropic keys start with "sk-ant-" — please check the key');
+  const meta = providerMeta(provider);
+  if (!meta) throw new AuthError(`Unknown provider '${provider}'`);
+  if (meta.keyRequired) {
+    if (meta.keyPrefix && !key.startsWith(meta.keyPrefix)) {
+      throw new AuthError(`${meta.displayName} keys start with "${meta.keyPrefix}" — please check the key`);
+    }
+    if (key.length < 20) throw new AuthError('That key looks too short to be valid');
   }
-  if (provider === 'openai' && !key.startsWith('sk-')) {
-    throw new AuthError('OpenAI keys start with "sk-" — please check the key');
-  }
-  if (key.length < 20) throw new AuthError('That key looks too short to be valid');
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', encryptionKey(), iv);
   const keyEnc = Buffer.concat([cipher.update(key, 'utf8'), cipher.final()]).toString('base64');

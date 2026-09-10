@@ -1,8 +1,12 @@
 name: 'MigratePR'
 description: >
   Open a test-verified migration PR when a repo pins an old Stripe SDK/API version.
-  Runs the deterministic rule engine; set ANTHROPIC_API_KEY to enable LLM-assisted rewrites.
+  Deterministic rule engine first, then a choice of LLM providers (Anthropic, OpenAI,
+  Groq, Mistral, DeepSeek, OpenRouter, or local Ollama) for what rules can't express.
 author: 'MigratePR'
+branding:
+  icon: 'git-pull-request'
+  color: 'purple'
 
 inputs:
   repo:

@@ -158,15 +158,36 @@ The PR body includes the verification receipt (baseline green, post-migration gr
 
 ## LLM engine
 
-Deterministic rules handle most migrations. For what they can't express, set a provider and use `--engine llm` (or `auto`):
+Deterministic rules handle most migrations. For what they can't express, configure a provider and use `--engine llm` (or `auto`). Seven providers are supported:
+
+| Provider | Activate with | Default model | Model override |
+|---|---|---|---|
+| **Anthropic** | `ANTHROPIC_API_KEY` | `claude-sonnet-4-5` | `MIGRATEPR_ANTHROPIC_MODEL` |
+| **OpenAI** | `OPENAI_API_KEY` | `gpt-4o-mini` | `MIGRATEPR_OPENAI_MODEL` |
+| **Groq** | `GROQ_API_KEY` | `llama-3.3-70b-versatile` | `MIGRATEPR_GROQ_MODEL` |
+| **Mistral** | `MISTRAL_API_KEY` | `mistral-large-latest` | `MIGRATEPR_MISTRAL_MODEL` |
+| **DeepSeek** | `DEEPSEEK_API_KEY` | `deepseek-coder` | `MIGRATEPR_DEEPSEEK_MODEL` |
+| **OpenRouter** | `OPENROUTER_API_KEY` | `anthropic/claude-sonnet-4.5` | `MIGRATEPR_OPENROUTER_MODEL` |
+| **Ollama (local)** | no key — just run `ollama serve` | auto-picked (see below) | `MIGRATEPR_OLLAMA_MODEL` |
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-…   # or OPENAI_API_KEY
+# cloud: any one key is enough
+export GROQ_API_KEY=gsk_…
 migratepr --repo . --engine auto
+
+# fully local, zero-config: if Ollama is running it is used automatically
+ollama serve
+ollama pull qwen2.5-coder:7b
+migratepr --repo . --engine llm
 ```
 
-- Anthropic: `ANTHROPIC_API_KEY`, model via `MIGRATEPR_ANTHROPIC_MODEL` (default `claude-sonnet-4-5`)
-- OpenAI: `OPENAI_API_KEY`, model via `MIGRATEPR_OPENAI_MODEL` (default `gpt-4o-mini`)
+**Ollama (fully local, private — code never leaves your machine):**
+
+- Server URL via `OLLAMA_HOST` (default `http://127.0.0.1:11434`)
+- The best installed model is auto-picked (code-tuned models preferred). Force one with `MIGRATEPR_OLLAMA_MODEL`
+- Force provider selection explicitly with `MIGRATEPR_LLM_PROVIDER` (one of: `anthropic`, `openai`, `groq`, `mistral`, `deepseek`, `openrouter`, `ollama`)
+
+Provider priority with multiple keys set: Anthropic → OpenAI → Groq → Mistral → DeepSeek → OpenRouter → local Ollama. The web app's key manager supports every provider above (with live "Test" checks, including Ollama reachability and model listing).
 
 Prompts are constrained by the rule's official guide excerpt; requests have per-attempt timeouts and exponential backoff on 429/5xx.
 

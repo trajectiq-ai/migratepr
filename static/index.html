@@ -182,16 +182,15 @@
       <div id="keysList"></div>
       <div class="msg" id="keyMsg"></div>
       <div class="row" style="margin-top:14px">
-        <div class="field" style="flex:0 0 140px">
+        <div class="field" style="flex:0 0 170px">
           <label for="kProvider">Provider</label>
           <select id="kProvider">
-            <option value="anthropic">Anthropic</option>
-            <option value="openai">OpenAI</option>
+            <option value="">Loading…</option>
           </select>
         </div>
         <div class="field" style="flex:2 1 260px">
           <label for="kKey">API key</label>
-          <input id="kKey" type="password" placeholder="sk-ant-… or sk-…" autocomplete="off" />
+          <input id="kKey" type="password" placeholder="choose a provider first" autocomplete="off" />
         </div>
         <div class="field">
           <label for="kLabel">Label (optional)</label>
@@ -271,7 +270,7 @@ $('btnLogout').onclick = async () => {
 function enterApp() {
   show($('authView'), false); show($('appView'), true); show($('navUser'), true);
   $('who').textContent = me.name + ' · ' + me.email;
-  refreshKeys(); refreshTracks(); refreshJobs();
+  refreshProviders(); refreshKeys(); refreshTracks(); refreshJobs();
 }
 
 /* ---------------- keys ---------------- */
@@ -283,6 +282,39 @@ async function refreshKeys() {
   } catch (err) { setMsg($('keyMsg'), err.message, 'err'); }
 }
 
+let PROVIDER_META = {};
+
+async function refreshProviders() {
+  try {
+    const data = await api('/api/providers');
+    const list = data.providers || [];
+    PROVIDER_META = Object.fromEntries(list.map(p => [p.id, p]));
+    const sel = $('kProvider');
+    sel.innerHTML = '<option value="">Select provider…</option>' +
+      list.map(p => '<option value="' + p.id + '">' + escapeHtml(p.displayName) + (p.local ? ' — no key needed' : '') + '</option>').join('');
+    updateKeyInputForProvider();
+  } catch (err) { /* non-fatal */ }
+}
+
+function updateKeyInputForProvider() {
+  const meta = PROVIDER_META[$('kProvider').value];
+  const input = $('kKey');
+  if (!meta) { input.placeholder = 'choose a provider first'; input.disabled = true; return; }
+  input.disabled = false;
+  input.placeholder = meta.placeholder || 'paste your API key';
+  if (meta.local) {
+    input.value = '';
+    input.placeholder = 'no key needed — runs on your machine';
+    setMsg($('keyMsg'), 'Ollama runs locally — just click “Test” to check the server is up (models you pulled become available to the LLM engine).', 'ok');
+  }
+}
+
+$('kProvider').onchange = updateKeyInputForProvider;
+
+function providerDisplayName(id) {
+  return (PROVIDER_META[id] && PROVIDER_META[id].displayName) || id;
+}
+
 function renderKeys(keys) {
   const box = $('keysList');
   if (!keys.length) {
@@ -292,7 +324,7 @@ function renderKeys(keys) {
   box.innerHTML = keys.map(k => {
     const statusClass = k.lastStatus === 'valid' ? 'valid' : k.lastStatus === 'invalid' ? 'invalid' : 'untested';
     const statusText = k.lastStatus === 'valid' ? 'valid' : k.lastStatus === 'invalid' ? 'invalid' : 'untested';
-    const provider = k.provider === 'anthropic' ? 'Anthropic' : 'OpenAI';
+    const provider = providerDisplayName(k.provider);
     return '<div class="key-row">' +
       '<span class="provider-badge">' + provider + '</span>' +
       '<span class="mono grow">' + escapeHtml(k.hint) + (k.label ? ' <span class="muted">(' + escapeHtml(k.label) + ')</span>' : '') + '</span>' +
@@ -322,9 +354,14 @@ window.deleteKey = async (id) => {
 
 $('btnAddKey').onclick = async () => {
   try {
+    const pid = $('kProvider').value;
+    if (!pid) { setMsg($('keyMsg'), 'Choose a provider first.', 'err'); return; }
+    const meta = PROVIDER_META[pid];
+    const keyVal = (meta && meta.local) ? 'local' : $('kKey').value;
+    if (!meta.local && !keyVal.trim()) { setMsg($('keyMsg'), 'Paste your API key first.', 'err'); return; }
     await api('/api/keys', {
       method: 'POST',
-      body: { provider: $('kProvider').value, key: $('kKey').value, label: $('kLabel').value },
+      body: { provider: pid, key: keyVal, label: $('kLabel').value },
     });
     $('kKey').value = ''; $('kLabel').value = '';
     setMsg($('keyMsg'), 'Key stored (encrypted). Use "Test" to verify it live.', 'ok');

@@ -11,11 +11,83 @@ import {
 } from './types';
 import { AnthropicProvider } from './providers/anthropic';
 import { OpenAiProvider } from './providers/openai';
+import { GroqProvider } from './providers/groq';
+import { MistralProvider } from './providers/mistral';
+import { DeepSeekProvider } from './providers/deepseek';
+import { OpenRouterProvider } from './providers/openrouter';
+import { OllamaProvider, isOllamaAvailable } from './providers/ollama';
 
-/** Pick the first configured provider (Anthropic, then OpenAI). */
-export function makeLlmProvider(): LlmProvider | null {
-  if (process.env.ANTHROPIC_API_KEY) return new AnthropicProvider();
-  if (process.env.OPENAI_API_KEY) return new OpenAiProvider();
+/** All supported providers, in priority order for auto-detection. */
+export const SUPPORTED_LLM_PROVIDERS = [
+  'anthropic',
+  'openai',
+  'groq',
+  'mistral',
+  'deepseek',
+  'openrouter',
+  'ollama',
+] as const;
+
+export type SupportedLlmProvider = (typeof SUPPORTED_LLM_PROVIDERS)[number];
+
+/** Env vars that activate a cloud provider, in priority order. */
+const PROVIDER_ENV_KEYS: Array<[SupportedLlmProvider, string]> = [
+  ['anthropic', 'ANTHROPIC_API_KEY'],
+  ['openai', 'OPENAI_API_KEY'],
+  ['groq', 'GROQ_API_KEY'],
+  ['mistral', 'MISTRAL_API_KEY'],
+  ['deepseek', 'DEEPSEEK_API_KEY'],
+  ['openrouter', 'OPENROUTER_API_KEY'],
+];
+
+export const NO_PROVIDER_HINT =
+  'no LLM provider configured (set ANTHROPIC_API_KEY, OPENAI_API_KEY, GROQ_API_KEY, '
+  + 'MISTRAL_API_KEY, DEEPSEEK_API_KEY or OPENROUTER_API_KEY — or start Ollama for fully-local rewrites; '
+  + 'force a provider with MIGRATEPR_LLM_PROVIDER)';
+
+function buildProvider(name: string): LlmProvider | null {
+  switch (name) {
+    case 'anthropic': return new AnthropicProvider();
+    case 'openai': return new OpenAiProvider();
+    case 'groq': return new GroqProvider();
+    case 'mistral': return new MistralProvider();
+    case 'deepseek': return new DeepSeekProvider();
+    case 'openrouter': return new OpenRouterProvider();
+    case 'ollama': return new OllamaProvider();
+    default: return null;
+  }
+}
+
+/**
+ * Pick the LLM provider for this run.
+ *
+ * Priority: an explicit MIGRATEPR_LLM_PROVIDER wins (validated — fail loudly
+ * on unknown names or unreachable Ollama); then the first cloud key present;
+ * then a local Ollama server if one is reachable (zero-config local mode);
+ * otherwise null (rules engine only).
+ */
+export async function makeLlmProvider(): Promise<LlmProvider | null> {
+  const forced = process.env.MIGRATEPR_LLM_PROVIDER?.trim().toLowerCase();
+  if (forced) {
+    const provider = buildProvider(forced);
+    if (!provider) {
+      throw new Error(
+        `Unknown MIGRATEPR_LLM_PROVIDER '${forced}' — supported: ${SUPPORTED_LLM_PROVIDERS.join(', ')}`,
+      );
+    }
+    if (forced === 'ollama' && !(await isOllamaAvailable())) {
+      const host = process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434';
+      throw new Error(`Ollama is not reachable at ${host} — is "ollama serve" running?`);
+    }
+    return provider;
+  }
+
+  for (const [name, envVar] of PROVIDER_ENV_KEYS) {
+    if (process.env[envVar]) return buildProvider(name);
+  }
+
+  // Zero-config local fallback: a running Ollama counts as configured.
+  if (await isOllamaAvailable()) return new OllamaProvider();
   return null;
 }
 

@@ -15,7 +15,7 @@ import { Scanner } from './scanner';
 import { Rewriter } from './rewriter';
 import { bumpSdkDependencies } from './bump';
 import { ensureDependencies, resolveVerifyCommand, runTests } from './verify';
-import { makeLlmProvider, llmRewrite } from './engine';
+import { makeLlmProvider, llmRewrite, NO_PROVIDER_HINT } from './engine';
 
 const BRANCH_PREFIX = 'migratepr';
 const DEFAULT_VERIFY_TIMEOUT_MS = 600_000;
@@ -180,9 +180,9 @@ export async function migrate(opts: MigrateOptions): Promise<MigrateReport> {
   const rewrites: MigrateReport['rewrites'] = [];
   const rulesById = new Map(track.rules.map(r => [r.id, r]));
   const engineChoice = settings.engine;
-  const llm = engineChoice === 'rules' ? null : makeLlmProvider();
+  const llm = engineChoice === 'rules' ? null : await makeLlmProvider();
   if (engineChoice !== 'rules' && !llm) {
-    logs.push('llm engine unavailable: no provider configured (set ANTHROPIC_API_KEY or OPENAI_API_KEY)');
+    logs.push(`llm engine unavailable: ${NO_PROVIDER_HINT}`);
   }
 
   for (const finding of findings) {
@@ -210,7 +210,7 @@ export async function migrate(opts: MigrateOptions): Promise<MigrateReport> {
     if (!llm) {
       skipped.push({
         ruleId: rule.id,
-        reason: 'needs LLM engine but no provider configured (set ANTHROPIC_API_KEY or OPENAI_API_KEY)',
+        reason: `needs LLM engine but ${NO_PROVIDER_HINT}`,
       });
       continue;
     }

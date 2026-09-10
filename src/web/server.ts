@@ -18,6 +18,7 @@ import {
   UserRecord,
 } from './auth';
 import { testApiKey } from './keytester';
+import { PROVIDERS, providerMeta } from './providers';
 import { runMigrate } from '../migrate';
 import { TRACKS } from '../rules';
 import { MigrateReport } from '../types';
@@ -163,15 +164,15 @@ function loadPersistedJobs(): void {
   }
 }
 
-/** Prefer a user key whose live test succeeded; skip keys known to be invalid. */
-function pickProviderKey(email: string): { env: 'ANTHROPIC_API_KEY' | 'OPENAI_API_KEY'; value: string } | null {
+/** Prefer a stored key whose live test succeeded; skip keys known to be invalid. */
+function pickProviderKey(email: string): { env: string; value: string } | null {
   for (const k of listApiKeys(email)) {
     if (k.lastStatus === 'invalid') continue;
+    const meta = providerMeta(k.provider);
+    if (!meta?.envVar) continue; // local runtimes (Ollama) need no injection
     const raw = getDecryptedApiKey(email, k.id);
     if (!raw) continue;
-    return k.provider === 'anthropic'
-      ? { env: 'ANTHROPIC_API_KEY', value: raw }
-      : { env: 'OPENAI_API_KEY', value: raw };
+    return { env: meta.envVar, value: raw };
   }
   return null;
 }
@@ -310,11 +311,12 @@ route('POST', /^\/api\/keys$/, async (req, res, body) => {
   const user = userFrom(req);
   if (!user) return json(res, 401, { error: 'Not signed in' });
   const { provider, key, label } = body as { provider?: string; key?: string; label?: string };
-  if (provider !== 'anthropic' && provider !== 'openai') {
-    return json(res, 400, { error: "provider must be 'anthropic' or 'openai'" });
+  const meta = providerMeta(provider ?? '');
+  if (!meta) {
+    return json(res, 400, { error: `provider must be one of: ${PROVIDERS.map(p => p.id).join(', ')}` });
   }
   if (!key || typeof key !== 'string') return json(res, 400, { error: 'key is required' });
-  const rec = saveApiKey(user.email, provider, key, label ?? '');
+  const rec = saveApiKey(user.email, meta.id, key, label ?? '');
   json(res, 201, { key: publicKeyView(rec) });
 });
 
@@ -333,6 +335,19 @@ route('POST', /^\/api\/keys\/([a-f0-9]+)\/test$/, async (req, res, _body, match)
 });
 
 /* ---- tracks + migrations ---- */
+
+route('GET', /^\/api\/providers$/, async (_req, res) => {
+  json(res, 200, {
+    providers: PROVIDERS.map(({ id, displayName, placeholder, signupUrl, keyRequired, local }) => ({
+      id,
+      displayName,
+      placeholder,
+      signupUrl,
+      keyRequired,
+      local: local ?? false,
+    })),
+  });
+});
 
 route('GET', /^\/api\/tracks$/, async (_req, res) => {
   json(res, 200, {
