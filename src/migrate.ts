@@ -6,6 +6,7 @@ import {
   MigrateOptions,
   MigrateReport,
   MigrateprConfig,
+  MigrationTrack,
   PrPayload,
   SkippedFinding,
 } from './types';
@@ -52,7 +53,7 @@ function isGitTreeClean(repoPath: string): boolean {
 function resolveSettings(
   repoPath: string,
   opts: MigrateOptions,
-): { trackId?: string; engine: 'rules' | 'llm' | 'auto'; skipRuleIds: string[]; excludePatterns: string[]; verifyCommand?: string; verifyTimeoutMs: number; install: boolean; prBase?: string; logs: string[] } {
+): { trackId?: string; customTracks?: MigrationTrack[]; engine: 'rules' | 'llm' | 'auto'; skipRuleIds: string[]; excludePatterns: string[]; verifyCommand?: string; verifyTimeoutMs: number; install: boolean; prBase?: string; logs: string[] } {
   const { config, file, error } = loadConfig(repoPath);
   const logs: string[] = [];
   if (error) throw new Error(`${error} (${file})`);
@@ -61,6 +62,7 @@ function resolveSettings(
   const cfg: MigrateprConfig = config;
   return {
     trackId: opts.trackId ?? cfg.track,
+    customTracks: cfg.tracks,
     engine: opts.engine ?? cfg.engine ?? 'auto',
     skipRuleIds: [...new Set([...(opts.skipRuleIds ?? []), ...(cfg.skipRules ?? [])])],
     excludePatterns: [...new Set([...(opts.excludePatterns ?? []), ...(cfg.exclude ?? [])])],
@@ -117,7 +119,7 @@ export async function migrate(opts: MigrateOptions): Promise<MigrateReport> {
     }
   }
 
-  const track = resolveTrackForRepo(repoPath, settings.trackId);
+  const track = resolveTrackForRepo(repoPath, settings.trackId, settings.customTracks);
   const skipSet = new Set(settings.skipRuleIds);
   const skipped: SkippedFinding[] = [];
 

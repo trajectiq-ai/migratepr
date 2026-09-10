@@ -113,7 +113,7 @@ export class Scanner {
         fs.readFileSync(file, 'utf8'),
         { overwrite: true },
       );
-      const { classNames, aliases } = this.collectStripeBindings(source);
+      const { classNames, aliases } = this.collectSdkBindings(source, track.sdkModule);
       const imports = this.collectImports(source);
       const exportFactories = this.collectExportedFactories(source, classNames, aliases);
       infos.push({ file: source, rel, classNames, aliases, imports, exportFactories });
@@ -142,7 +142,9 @@ export class Scanner {
 
       for (const call of info.file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
         const chain = this.resolveChain(call.getExpression(), ctx);
-        if (!chain || chain.length < 2) continue;
+        // Allow single-segment chains: for client-bound resources the resource
+        // is '' (e.g. `app.del(...)` where `app` itself is the SDK client).
+        if (!chain || chain.length === 0) continue;
         const resource = chain.slice(0, -1).join('.');
         const method = chain[chain.length - 1];
 
@@ -186,7 +188,7 @@ export class Scanner {
         const parent = pae.getParent();
         if (parent && Node.isCallExpression(parent) && parent.getExpression() === pae) continue;
         const chain = this.resolveChain(pae, ctx);
-        if (!chain || chain.length < 2) continue;
+        if (!chain || chain.length === 0) continue;
         const resource = chain.slice(0, -1).join('.');
         const method = chain[chain.length - 1];
         for (const rule of methodRules) {
@@ -228,8 +230,13 @@ export class Scanner {
     return { findings, filesScanned: files.length, wrappers };
   }
 
-  /** Identifiers bound to the Stripe class and local aliases of its members. */
-  private collectStripeBindings(source: SourceFile): {
+  /**
+   * Identifiers bound to the SDK client of the current track's module, plus
+   * local aliases of its members. Vendor-agnostic: whatever module the track
+   * pins (`stripe`, `express`, …) drives both import matching and the
+   * factory bindings (`const app = express()`).
+   */
+  private collectSdkBindings(source: SourceFile, sdkModule: string): {
     classNames: Set<string>;
     aliases: Map<string, string[]>;
   } {
@@ -237,7 +244,7 @@ export class Scanner {
     const aliases = new Map<string, string[]>();
 
     for (const d of source.getImportDeclarations()) {
-      if (d.getModuleSpecifierValue() !== 'stripe') continue;
+      if (d.getModuleSpecifierValue() !== sdkModule) continue;
       const di = d.getDefaultImport();
       if (di) classNames.add(di.getText());
       const ni = d.getNamespaceImport();
@@ -257,14 +264,20 @@ export class Scanner {
         if (!init) continue;
 
         if (Node.isNewExpression(init)) {
+          // `const stripe = new Stripe(key, {…})`
           if (classNames.has(init.getExpression().getText())) classNames.add(name);
           continue;
         }
         if (Node.isCallExpression(init) && init.getExpression().getText() === 'require') {
           const arg = init.getArguments()[0];
-          if (arg && Node.isStringLiteral(arg) && arg.getLiteralText() === 'stripe') {
+          if (arg && Node.isStringLiteral(arg) && arg.getLiteralText() === sdkModule) {
             classNames.add(name);
           }
+          continue;
+        }
+        if (Node.isCallExpression(init)) {
+          // `const app = express()` — factory call from the SDK module.
+          if (classNames.has(init.getExpression().getText())) classNames.add(name);
           continue;
         }
       }
@@ -599,6 +612,12 @@ export class Scanner {
 
       for (const prop of obj.getProperties()) {
         if (!Node.isPropertyAssignment(prop)) continue;
+        if (rule.resource === '') {
+          // Resource-less mock (e.g. `const app = { del: jest.fn() }`): the
+          // object literal itself is the resource; match the method key directly.
+          if (prop.getName() === rule.from) hits.push(prop);
+          continue;
+        }
         if (prop.getName() !== rule.resource) continue;
         const init = prop.getInitializer();
         if (!init || !Node.isObjectLiteralExpression(init)) continue;

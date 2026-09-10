@@ -4,6 +4,7 @@ import * as path from 'path';
 import { migrate } from './migrate';
 import { MigrateReport } from './types';
 import { resolveTrackForRepo, majorOf } from './rules';
+import { loadConfig } from './config';
 import { Scanner } from './scanner';
 
 /**
@@ -116,7 +117,9 @@ export function computeFingerprint(
   trackId?: string,
   excludes: string[] = [],
 ): FingerprintData {
-  const track = resolveTrackForRepo(repoPath, trackId);
+  // Custom tracks from .migratepr.json participate in detection too.
+  const { config } = loadConfig(repoPath);
+  const track = resolveTrackForRepo(repoPath, trackId, config.tracks);
   const scan = new Scanner().scan(repoPath, track, excludes);
   const findings = scan.findings
     .map(f => `${f.ruleId}|${f.file}|${f.line}|${f.snippet}`)

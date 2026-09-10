@@ -13,6 +13,7 @@ export const STRIPE_TRACKS: MigrationTrack[] = [
   {
     id: 'stripe-v12-to-v13',
     vendor: 'stripe',
+    sdkModule: 'stripe',
     sdkFrom: 12,
     sdkTo: 13,
     apiFrom: '2022-11-15',
@@ -82,6 +83,7 @@ export const STRIPE_TRACKS: MigrationTrack[] = [
     // Basil (2025-03-31.basil) replaced the Upcoming Invoice API.
     id: 'stripe-v17-to-v18',
     vendor: 'stripe',
+    sdkModule: 'stripe',
     sdkFrom: 17,
     sdkTo: 18,
     apiFrom: '2024-12-18.acacia',

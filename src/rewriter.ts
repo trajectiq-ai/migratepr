@@ -182,6 +182,12 @@ export class Rewriter {
       if (prop.getText() !== finding.snippet) continue;
       const parent = prop.getParent();
       if (!parent || !Node.isObjectLiteralExpression(parent)) continue;
+      if (rule.resource === '') {
+        // Resource-less mock: `const app = { del: jest.fn() }` — the object
+        // literal is the resource and the snippet key is the method itself.
+        prop.getNameNode().replaceWithText(rule.to);
+        return prop.getText();
+      }
       const outer = parent.getParent();
       if (!outer || !Node.isPropertyAssignment(outer)) continue;
       if (outer.getName() !== rule.resource) continue;

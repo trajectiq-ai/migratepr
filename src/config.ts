@@ -1,10 +1,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { MigrateprConfig } from './types';
+import { MigrateprConfig, MigrationRule, MigrationTrack } from './types';
 
 export const CONFIG_FILES = ['.migratepr.json', 'migratepr.config.json'];
 
 const VALID_ENGINES = new Set(['rules', 'llm', 'auto']);
+const VALID_RISKS = new Set(['mechanical', 'review-recommended', 'semantic']);
 
 /**
  * Load the repo's .migratepr.json (first matching name wins). Never throws:
@@ -86,5 +87,121 @@ export function validateConfig(raw: unknown): MigrateprConfig {
     }
     out.prBase = cfg.prBase;
   }
+  if (cfg.tracks !== undefined) {
+    if (!Array.isArray(cfg.tracks)) throw new Error("'tracks' must be an array of track objects");
+    out.tracks = cfg.tracks.map(parseTrack);
+  }
   return out;
+}
+
+/* --------------------------- JSON rule DSL (tracks) --------------------------- */
+
+const RULE_KINDS = new Set([
+  'method-rename',
+  'param-rename',
+  'api-version',
+  'mock-method-key',
+  'sdk-bump',
+]);
+
+/** Structural validation for a rule object from .migratepr.json. */
+function parseRule(raw: unknown, trackId: string, index: number): MigrationRule {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error(`tracks[${trackId}].rules[${index}] must be an object`);
+  }
+  const r = raw as Record<string, unknown>;
+  const kind = r.kind;
+  if (typeof kind !== 'string' || !RULE_KINDS.has(kind)) {
+    throw new Error(
+      `tracks[${trackId}].rules[${index}].kind must be one of: ${[...RULE_KINDS].join(', ')}`,
+    );
+  }
+  const str = (k: string, required = true): string => {
+    const v = r[k];
+    if (typeof v !== 'string' || v.trim().length === 0) {
+      if (required) throw new Error(`tracks[${trackId}].rules[${index}].${k} must be a non-empty string`);
+      return undefined as never;
+    }
+    return v;
+  };
+  const risk = str('risk');
+  if (!VALID_RISKS.has(risk)) {
+    throw new Error(`tracks[${trackId}].rules[${index}].risk must be one of: ${[...VALID_RISKS].join(', ')}`);
+  }
+  const ruleId =
+    typeof r.id === 'string' && r.id.trim().length > 0
+      ? r.id
+      : `${trackId}:${str('name')}`;
+  const base = {
+    id: ruleId,
+    kind: kind as MigrationRule['kind'],
+    summary: str('summary'),
+    guideUrl: str('guideUrl'),
+    risk: risk as MigrationRule['risk'],
+    ...(typeof r.needsLlm === 'boolean' ? { needsLlm: r.needsLlm } : {}),
+    ...(typeof r.guideExcerpt === 'string' ? { guideExcerpt: r.guideExcerpt } : {}),
+  };
+
+  switch (kind) {
+    case 'method-rename':
+    case 'mock-method-key':
+      return { ...base, resource: str('resource', false) ?? '', from: str('from'), to: str('to') } as MigrationRule;
+    case 'param-rename':
+      return {
+        ...base,
+        resource: str('resource', false) ?? '',
+        ...(typeof r.method === 'string' ? { method: r.method } : {}),
+        from: str('from'),
+        to: str('to'),
+        ...(typeof r.wrapTemplate === 'string' ? { wrapTemplate: r.wrapTemplate } : {}),
+      } as MigrationRule;
+    case 'api-version':
+      return { ...base, from: str('from'), to: str('to') } as MigrationRule;
+    case 'sdk-bump':
+      return { ...base, packageName: str('packageName'), to: str('to') } as MigrationRule;
+    default:
+      throw new Error(`tracks[${trackId}].rules[${index}]: unsupported kind`);
+  }
+}
+
+/** Parse and validate one custom track from .migratepr.json. */
+function parseTrack(raw: unknown, trackIndex: number): MigrationTrack {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error(`tracks[${trackIndex}] must be an object`);
+  }
+  const t = raw as Record<string, unknown>;
+  const str = (k: string): string => {
+    const v = t[k];
+    if (typeof v !== 'string' || v.trim().length === 0) {
+      throw new Error(`tracks[${trackIndex}].${k} must be a non-empty string`);
+    }
+    return v;
+  };
+  const num = (k: string): number => {
+    const v = t[k];
+    if (typeof v !== 'number' || !Number.isInteger(v)) {
+      throw new Error(`tracks[${trackIndex}].${k} must be an integer`);
+    }
+    return v;
+  };
+  const id = str('id');
+  const rulesRaw = t.rules;
+  if (!Array.isArray(rulesRaw) || rulesRaw.length === 0) {
+    throw new Error(`tracks[${trackIndex}].rules must be a non-empty array`);
+  }
+  const guideUrlsRaw = t.guideUrls;
+  if (!Array.isArray(guideUrlsRaw) || guideUrlsRaw.length === 0 || guideUrlsRaw.some(u => typeof u !== 'string')) {
+    throw new Error(`tracks[${trackIndex}].guideUrls must be an array of URLs`);
+  }
+  return {
+    id,
+    vendor: str('vendor'),
+    sdkModule: str('sdkModule'),
+    sdkFrom: num('sdkFrom'),
+    sdkTo: num('sdkTo'),
+    apiFrom: str('apiFrom'),
+    apiTo: str('apiTo'),
+    guideUrls: guideUrlsRaw as string[],
+    rules: rulesRaw.map((r, i) => parseRule(r, id, i)),
+  };
 }

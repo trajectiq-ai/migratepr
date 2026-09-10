@@ -98,7 +98,10 @@ export interface LlmProvider {
 /** One vendor upgrade path, e.g. stripe-node v12 → v13. */
 export interface MigrationTrack {
   id: string;
+  /** Display name for PRs and logs, e.g. 'stripe' or 'express'. */
   vendor: string;
+  /** npm package name that identifies the SDK (drives detection + scanning). */
+  sdkModule: string;
   sdkFrom: number;
   sdkTo: number;
   apiFrom: string;
@@ -207,6 +210,12 @@ export interface VerifyFnInput {
 /** Repository-level config file (.migratepr.json). All fields optional. */
 export interface MigrateprConfig {
   $schema?: string;
+  /**
+   * Custom migration tracks defined in config (JSON rule DSL). Merged over
+   * the built-in registry; custom tracks with the same id win. Rules are the
+   * same shape as the TypeScript registry — no compilation needed.
+   */
+  tracks?: MigrationTrack[];
   /** Migration track id (e.g. 'stripe-v12-to-v13'). Default: auto-detect. */
   track?: string;
   /** Rewrite engine. Default: 'auto' (rules first, LLM for the rest). */

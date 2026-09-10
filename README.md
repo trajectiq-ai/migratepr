@@ -47,7 +47,59 @@ migratepr --repo path/to/repo --json
 migratepr --repo path/to/repo --push
 ```
 
-Track auto-detection: `stripe@^12` in `package.json` → the `stripe-v12-to-v13` track. `migratepr --list-tracks` shows all supported upgrade paths.
+Track auto-detection: the pinned SDK major in `package.json` picks the track
+(`stripe@^12` → `stripe-v12-to-v13`, `express@^4` → `express-v4-to-v5`).
+`migratepr --list-tracks` shows all supported upgrade paths.
+
+| Track | SDK upgrade | What gets rewritten |
+|---|---|---|
+| `stripe-v12-to-v13` | stripe ^12 → ^13 | `subscriptions.del()` → `cancel()`, `shipping_rates` → `shipping_options` reshape, API pin, Jest mocks, test assertions |
+| `stripe-v17-to-v18` | stripe ^17 → ^18 | Upcoming Invoice API → Create Preview (`retrieveUpcoming` → `createPreview`), API pin |
+| `express-v4-to-v5` | express ^4 → ^5 | `app.del()` → `app.delete()`, Express mocks, SDK bump |
+
+## Custom tracks — the JSON rule DSL
+
+Tracks are pure data. Define your own vendor migrations in `.migratepr.json`
+— no TypeScript, no rebuild — and the whole engine (scan → rewrite → verify →
+watch) picks them up. Custom tracks override built-ins with the same id.
+
+```jsonc
+{
+  "tracks": [
+    {
+      "id": "acme-sdk-v1-to-v2",
+      "vendor": "acme",
+      "sdkModule": "@acme/sdk",
+      "sdkFrom": 1,
+      "sdkTo": 2,
+      "apiFrom": "1.0",
+      "apiTo": "2.0",
+      "guideUrls": ["https://docs.acme.example/migration-v2"],
+      "rules": [
+        {
+          "kind": "method-rename",
+          "resource": "widgets",
+          "from": "destroy",
+          "to": "remove",
+          "summary": "widgets.destroy() became widgets.remove() in v2",
+          "guideUrl": "https://docs.acme.example/migration-v2",
+          "risk": "mechanical"
+        },
+        { "kind": "sdk-bump", "packageName": "@acme/sdk", "to": "^2.0.0", "summary": "Bump to v2", "guideUrl": "…", "risk": "mechanical" }
+      ]
+    }
+  ]
+}
+```
+
+Rule kinds: `method-rename` (resource + from/to), `param-rename` (optional
+`method`, `wrapTemplate` value reshape), `api-version` (from/to pin),
+`mock-method-key` (test doubles), and `sdk-bump` (package.json range).
+`resource` is the property chain before the method (`'subscriptions'` for
+`stripe.subscriptions.del`); leave it `""` when the client itself is the
+resource (e.g. `app.del(...)`). `risk` is `mechanical` | `review-recommended`
+| `semantic`. Invalid tracks fail loudly with a precise error instead of
+silently doing nothing.
 
 ## Self-maintaining watch (keep repos migrated automatically)
 
