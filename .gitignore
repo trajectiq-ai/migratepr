@@ -1,0 +1,9 @@
+node_modules/
+dist/
+artifacts/
+*.log
+.env
+data/
+.tmp-*/
+.freebuff/
+realworld-sample/node_modules/

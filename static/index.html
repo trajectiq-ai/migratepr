@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MigratePR — test-verified API migrations</title>
+<style>
+  :root {
+    --bg: #f6f7fb; --card: #ffffff; --ink: #111827; --muted: #6b7280;
+    --line: #e5e7eb; --accent: #4f46e5; --accent-dark: #4338ca;
+    --green: #16a34a; --red: #dc2626; --amber: #d97706; --chip: #eef2ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  nav {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 28px; background: var(--card); border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; z-index: 10;
+  }
+  .brand { font-weight: 700; font-size: 17px; letter-spacing: -0.2px; }
+  .brand span { color: var(--accent); }
+  .brand small { color: var(--muted); font-weight: 400; margin-left: 8px; }
+  main { max-width: 980px; margin: 0 auto; padding: 28px 20px 80px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 22px; margin-bottom: 20px; box-shadow: 0 1px 2px rgba(17,24,39,.04);
+  }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.3px; }
+  h2 { font-size: 16px; margin: 0 0 12px; }
+  .sub { color: var(--muted); margin: 0 0 18px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+  label { display: block; font-size: 12.5px; font-weight: 600; color: var(--muted); margin-bottom: 4px; }
+  input, select {
+    width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px;
+    font: inherit; background: #fff; color: var(--ink);
+  }
+  input:focus, select:focus { outline: 2px solid var(--chip); border-color: var(--accent); }
+  .field { flex: 1 1 180px; }
+  button {
+    padding: 9px 16px; border: 0; border-radius: 9px; font: inherit; font-weight: 600;
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button:hover { background: var(--accent-dark); }
+  button.ghost { background: #fff; color: var(--ink); border: 1px solid var(--line); }
+  button.ghost:hover { background: var(--bg); }
+  button.small { padding: 5px 10px; font-size: 13px; }
+  button:disabled { opacity: .55; cursor: default; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 16px; background: var(--bg); padding: 4px; border-radius: 10px; width: max-content; }
+  .tabs button { background: transparent; color: var(--muted); padding: 7px 16px; border-radius: 8px; font-weight: 600; }
+  .tabs button.active { background: #fff; color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+  .auth-wrap { max-width: 420px; margin: 40px auto 0; }
+  .msg { padding: 10px 14px; border-radius: 9px; margin: 12px 0; display: none; font-size: 14px; }
+  .msg.err { display: block; background: #fef2f2; color: var(--red); border: 1px solid #fecaca; }
+  .msg.ok { display: block; background: #f0fdf4; color: var(--green); border: 1px solid #bbf7d0; }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 99px; font-size: 12px; font-weight: 600; }
+  .pill.valid { background: #f0fdf4; color: var(--green); }
+  .pill.invalid { background: #fef2f2; color: var(--red); }
+  .pill.untested { background: #fffbeb; color: var(--amber); }
+  .pill.running { background: #eff6ff; color: #2563eb; }
+  .pill.queued { background: var(--chip); color: var(--accent); }
+  .pill.done-migrated { background: #f0fdf4; color: var(--green); }
+  .pill.done-aborted { background: #fef2f2; color: var(--red); }
+  .pill.done-diff-review, .pill.error { background: #fffbeb; color: var(--amber); }
+  .provider-badge { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+  .key-row, .job-row {
+    display: flex; align-items: center; gap: 12px; padding: 12px 0;
+    border-top: 1px solid var(--line); flex-wrap: wrap;
+  }
+  .key-row .grow, .job-row .grow { flex: 1; min-width: 200px; }
+  .mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 13px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  pre {
+    background: #0f172a; color: #e2e8f0; padding: 14px; border-radius: 10px;
+    overflow-x: auto; font: 12.5px/1.6 ui-monospace, Consolas, monospace; white-space: pre-wrap;
+  }
+  .hide { display: none !important; }
+  .stat { display: inline-block; margin-right: 18px; }
+  .stat b { font-size: 20px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th { text-align: left; color: var(--muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  td code { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; background: var(--bg); padding: 1px 5px; border-radius: 5px; }
+  .detail-block { margin-top: 14px; }
+  details summary { cursor: pointer; font-weight: 600; color: var(--accent); margin: 8px 0; }
+  .empty { color: var(--muted); text-align: center; padding: 18px 0; }
+  .footer-note { color: var(--muted); font-size: 12.5px; margin-top: 26px; text-align: center; }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="brand">Migrate<span>PR</span><small>test-verified API migrations</small></div>
+  <div id="navUser" class="hide">
+    <span class="muted" id="who"></span>
+    <button class="ghost small" id="btnLogout" style="margin-left:10px">Sign out</button>
+  </div>
+</nav>
+
+<main>
+  <!-- ============ AUTH ============ -->
+  <section id="authView" class="auth-wrap hide">
+    <div class="card">
+      <h1>Welcome to MigratePR</h1>
+      <p class="sub">Register or sign in to run test-verified migrations and store your AI API keys securely.</p>
+      <div class="tabs">
+        <button id="tabLogin" class="active">Sign in</button>
+        <button id="tabRegister">Create account</button>
+      </div>
+      <div class="msg" id="authMsg"></div>
+      <form id="authForm">
+        <div class="field hide" id="nameField" style="margin-bottom:12px">
+          <label for="fName">Name</label>
+          <input id="fName" type="text" placeholder="Ada Lovelace" autocomplete="name" />
+        </div>
+        <div class="field" style="margin-bottom:12px">
+          <label for="fEmail">Email</label>
+          <input id="fEmail" type="email" placeholder="you@company.com" autocomplete="email" required />
+        </div>
+        <div class="field" style="margin-bottom:16px">
+          <label for="fPass">Password</label>
+          <input id="fPass" type="password" placeholder="At least 8 characters" autocomplete="current-password" required />
+        </div>
+        <button type="submit" id="authSubmit" style="width:100%">Sign in</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- ============ APP ============ -->
+  <section id="appView" class="hide">
+    <div class="card">
+      <h1>Run a migration</h1>
+      <p class="sub">Point MigratePR at any local repository. It detects every affected call site, rewrites them,
+        and runs the repo's own test suite twice — baseline and post-migration. Nothing is pushed unless you ask.</p>
+      <div class="msg" id="runMsg"></div>
+      <div class="row">
+        <div class="field" style="flex:2 1 320px">
+          <label for="rRepo">Repository path</label>
+          <input id="rRepo" type="text" placeholder="C:\code\my-app  (or realworld-sample)" />
+        </div>
+        <div class="field">
+          <label for="rEngine">Engine</label>
+          <select id="rEngine">
+            <option value="auto">auto (rules first, LLM for the rest)</option>
+            <option value="rules">rules (deterministic, no AI)</option>
+            <option value="llm">llm (AI-constrained by guides)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="rTrack">Migration track</label>
+          <select id="rTrack"><option value="">auto-detect</option></select>
+        </div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <label style="display:flex;align-items:center;gap:8px;font-weight:500;color:var(--ink);font-size:14px;margin:0">
+          <input type="checkbox" id="rPush" style="width:auto" />
+          Open a real pull request (--push) — requires a clean git tree
+        </label>
+        <span style="flex:1"></span>
+        <button class="ghost small" id="btnSample">Use the sample repo</button>
+        <button id="btnRun">Start migration</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Migrations</h2>
+      <div id="jobsList"><div class="empty">No migrations yet.</div></div>
+    </div>
+
+    <div class="card" id="jobDetail" style="display:none">
+      <h2 id="jdTitle">Migration detail</h2>
+      <div id="jdSummary"></div>
+      <div id="jdBody"></div>
+    </div>
+
+    <div class="card">
+      <h2>AI API keys</h2>
+      <p class="sub">Keys are encrypted (AES-256-GCM) on this machine and used only to power the LLM rewrite engine.
+        Only a masked hint is ever displayed.</p>
+      <div id="keysList"></div>
+      <div class="msg" id="keyMsg"></div>
+      <div class="row" style="margin-top:14px">
+        <div class="field" style="flex:0 0 140px">
+          <label for="kProvider">Provider</label>
+          <select id="kProvider">
+            <option value="anthropic">Anthropic</option>
+            <option value="openai">OpenAI</option>
+          </select>
+        </div>
+        <div class="field" style="flex:2 1 260px">
+          <label for="kKey">API key</label>
+          <input id="kKey" type="password" placeholder="sk-ant-… or sk-…" autocomplete="off" />
+        </div>
+        <div class="field">
+          <label for="kLabel">Label (optional)</label>
+          <input id="kLabel" type="text" placeholder="work laptop" />
+        </div>
+        <button id="btnAddKey">Add key</button>
+      </div>
+    </div>
+
+    <p class="footer-note">MigratePR v1.0.0 — deterministic AST detection · guide-constrained rewrite · test-gated delivery</p>
+  </section>
+</main>
+
+<script>
+'use strict';
+let me = null;
+let tracks = [];
+let pollTimer = null;
+
+const $ = (id) => document.getElementById(id);
+
+function show(el, on) { el.classList.toggle('hide', !on); }
+function setMsg(el, text, kind) {
+  el.textContent = text;
+  el.className = 'msg' + (text ? (kind === 'err' ? ' err' : ' ok') : '');
+}
+
+async function api(path, opts) {
+  const init = { headers: {}, method: (opts && opts.method) || 'GET' };
+  if (opts && opts.body !== undefined) {
+    init.headers['Content-Type'] = 'application/json';
+    init.body = JSON.stringify(opts.body);
+  }
+  const res = await fetch(path, init);
+  let data = {};
+  try { data = await res.json(); } catch (e) { /* empty body */ }
+  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+  return data;
+}
+
+/* ---------------- auth ---------------- */
+
+let authMode = 'login';
+function setAuthMode(mode) {
+  authMode = mode;
+  $('tabLogin').classList.toggle('active', mode === 'login');
+  $('tabRegister').classList.toggle('active', mode === 'register');
+  show($('nameField'), mode === 'register');
+  $('authSubmit').textContent = mode === 'login' ? 'Sign in' : 'Create account';
+  setMsg($('authMsg'), '');
+}
+$('tabLogin').onclick = () => setAuthMode('login');
+$('tabRegister').onclick = () => setAuthMode('register');
+
+$('authForm').onsubmit = async (ev) => {
+  ev.preventDefault();
+  const btn = $('authSubmit');
+  btn.disabled = true;
+  try {
+    const body = { email: $('fEmail').value, password: $('fPass').value, name: $('fName').value };
+    const data = await api(authMode === 'login' ? '/api/login' : '/api/register', { method: 'POST', body });
+    me = data.user;
+    enterApp();
+  } catch (err) {
+    setMsg($('authMsg'), err.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+$('btnLogout').onclick = async () => {
+  await api('/api/logout', { method: 'POST', body: {} });
+  me = null;
+  show($('appView'), false); show($('navUser'), false); show($('authView'), true);
+};
+
+function enterApp() {
+  show($('authView'), false); show($('appView'), true); show($('navUser'), true);
+  $('who').textContent = me.name + ' · ' + me.email;
+  refreshKeys(); refreshTracks(); refreshJobs();
+}
+
+/* ---------------- keys ---------------- */
+
+async function refreshKeys() {
+  try {
+    const data = await api('/api/keys');
+    renderKeys(data.keys || []);
+  } catch (err) { setMsg($('keyMsg'), err.message, 'err'); }
+}
+
+function renderKeys(keys) {
+  const box = $('keysList');
+  if (!keys.length) {
+    box.innerHTML = '<div class="empty">No keys yet — add one below to enable the LLM engine. The rules engine works without any key.</div>';
+    return;
+  }
+  box.innerHTML = keys.map(k => {
+    const statusClass = k.lastStatus === 'valid' ? 'valid' : k.lastStatus === 'invalid' ? 'invalid' : 'untested';
+    const statusText = k.lastStatus === 'valid' ? 'valid' : k.lastStatus === 'invalid' ? 'invalid' : 'untested';
+    const provider = k.provider === 'anthropic' ? 'Anthropic' : 'OpenAI';
+    return '<div class="key-row">' +
+      '<span class="provider-badge">' + provider + '</span>' +
+      '<span class="mono grow">' + escapeHtml(k.hint) + (k.label ? ' <span class="muted">(' + escapeHtml(k.label) + ')</span>' : '') + '</span>' +
+      '<span class="pill ' + statusClass + '">' + statusText + '</span>' +
+      '<button class="ghost small" onclick="testKey(\'' + k.id + '\')">Test</button>' +
+      '<button class="ghost small" onclick="deleteKey(\'' + k.id + '\')">Delete</button>' +
+      '</div>';
+  }).join('');
+}
+
+window.testKey = async (id) => {
+  setMsg($('keyMsg'), 'Testing key against provider…');
+  try {
+    const r = await api('/api/keys/' + id + '/test', { method: 'POST', body: {} });
+    setMsg($('keyMsg'), r.message, r.ok ? 'ok' : 'err');
+    refreshKeys();
+  } catch (err) { setMsg($('keyMsg'), err.message, 'err'); }
+};
+
+window.deleteKey = async (id) => {
+  try {
+    await api('/api/keys/' + id, { method: 'DELETE', body: {} });
+    setMsg($('keyMsg'), 'Key deleted.', 'ok');
+    refreshKeys();
+  } catch (err) { setMsg($('keyMsg'), err.message, 'err'); }
+};
+
+$('btnAddKey').onclick = async () => {
+  try {
+    await api('/api/keys', {
+      method: 'POST',
+      body: { provider: $('kProvider').value, key: $('kKey').value, label: $('kLabel').value },
+    });
+    $('kKey').value = ''; $('kLabel').value = '';
+    setMsg($('keyMsg'), 'Key stored (encrypted). Use "Test" to verify it live.', 'ok');
+    refreshKeys();
+  } catch (err) { setMsg($('keyMsg'), err.message, 'err'); }
+};
+
+/* ---------------- tracks + run ---------------- */
+
+async function refreshTracks() {
+  try {
+    const data = await api('/api/tracks');
+    tracks = data.tracks || [];
+    const sel = $('rTrack');
+    sel.innerHTML = '<option value="">auto-detect</option>' +
+      tracks.map(t => '<option value="' + t.id + '">' + t.vendor + ' v' + t.sdkFrom + ' → v' + t.sdkTo + '</option>').join('');
+  } catch (err) { /* non-fatal */ }
+}
+
+$('btnSample').onclick = () => { $('rRepo').value = 'realworld-sample'; };
+
+$('btnRun').onclick = async () => {
+  setMsg($('runMsg'), '');
+  try {
+    const body = {
+      repoPath: $('rRepo').value,
+      engine: $('rEngine').value,
+      trackId: $('rTrack').value || undefined,
+      push: $('rPush').checked,
+    };
+    const data = await api('/api/migrate', { method: 'POST', body });
+    setMsg($('runMsg'), 'Migration queued — running the full verify pipeline…', 'ok');
+    refreshJobs();
+  } catch (err) { setMsg($('runMsg'), err.message, 'err'); }
+};
+
+/* ---------------- jobs ---------------- */
+
+async function refreshJobs() {
+  try {
+    const data = await api('/api/jobs');
+    renderJobs(data.jobs || []);
+    schedulePoll(data.jobs || []);
+  } catch (err) { /* signed out */ }
+}
+
+function schedulePoll(jobs) {
+  const active = jobs.some(j => j.status === 'queued' || j.status === 'running');
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  if (active) pollTimer = setTimeout(refreshJobs, 1500);
+}
+
+function renderJobs(jobs) {
+  const box = $('jobsList');
+  if (!jobs.length) { box.innerHTML = '<div class="empty">No migrations yet.</div>'; return; }
+  box.innerHTML = jobs.map(j =>
+    '<div class="job-row">' +
+      '<span class="pill ' + (j.status === 'done' ? 'done-' + (j.status2 || 'migrated') : j.status) + '">' + jobLabel(j) + '</span>' +
+      '<span class="mono grow">' + escapeHtml(j.repoPath) + '</span>' +
+      '<span class="muted">' + (j.findings !== undefined ? j.findings + ' findings · ' + j.rewrites + ' rewrites' : '') + '</span>' +
+      '<button class="ghost small" onclick="openJob(\'' + j.id + '\')">View</button>' +
+    '</div>').join('');
+}
+
+function jobLabel(j) {
+  if (j.status === 'running') return 'running';
+  if (j.status === 'queued') return 'queued';
+  if (j.status === 'error') return 'error';
+  return j.status2 || j.status;
+}
+
+window.openJob = async (id) => {
+  try {
+    const data = await api('/api/jobs/' + id);
+    renderJobDetail(data.job);
+    if (data.job.status === 'queued' || data.job.status === 'running') {
+      setTimeout(() => window.openJob(id), 1500);
+    }
+  } catch (err) { setMsg($('runMsg'), err.message, 'err'); }
+};
+
+function renderJobDetail(job) {
+  const d = $('jobDetail');
+  d.style.display = 'block';
+  $('jdTitle').textContent = 'Migration — ' + job.repoPath;
+  const r = job.report;
+  if (!r) {
+    $('jdSummary').innerHTML = '<span class="pill ' + job.status + '">' + job.status + '</span>';
+    $('jdBody').innerHTML = job.error ? '<pre>' + escapeHtml(job.error) + '</pre>' : '<div class="empty">Working…</div>';
+    return;
+  }
+  const summary =
+    '<span class="pill ' + (r.status === 'migrated' ? 'done-migrated' : r.status === 'aborted' ? 'done-aborted' : 'done-diff-review') + '">' + r.status + '</span>' +
+    '<div style="margin-top:10px">' +
+      '<span class="stat"><b>' + r.findings.length + '</b> <span class="muted">findings</span></span>' +
+      '<span class="stat"><b>' + r.rewrites.length + '</b> <span class="muted">rewrites</span></span>' +
+      '<span class="stat"><b>' + r.track.id + '</b> <span class="muted">track</span></span>' +
+    '</div>' +
+    (r.baseline ? '<div class="muted">baseline: ' + r.baseline.ok + ' · post-migration: ' + (r.post ? r.post.ok : '—') + '</div>' : '') +
+    (r.reason ? '<div class="msg err" style="display:block">' + escapeHtml(r.reason) + '</div>' : '');
+  $('jdSummary').innerHTML = summary;
+
+  let body = '';
+  if (r.rewrites.length) {
+    body += '<div class="detail-block"><h2>Rewrites</h2><table><tr><th>File</th><th>Rule</th><th>Engine</th></tr>' +
+      r.rewrites.map(w => '<tr><td><code>' + escapeHtml(w.file) + (w.line ? ':' + w.line : '') + '</code></td>' +
+        '<td><code>' + escapeHtml(w.ruleId) + '</code></td><td>' + w.engine + '</td></tr>').join('') + '</table></div>';
+  }
+  if (r.skipped && r.skipped.length) {
+    body += '<div class="detail-block"><h2>Skipped (need human attention)</h2><ul>' +
+      r.skipped.map(s => '<li><code>' + escapeHtml(s.ruleId) + '</code> — ' + escapeHtml(s.reason) + '</li>').join('') + '</ul></div>';
+  }
+  if (r.pr) {
+    body += '<div class="detail-block"><h2>Pull request</h2><div class="mono">branch: ' + escapeHtml(r.pr.branch) + '<br/>title: ' + escapeHtml(r.pr.title) + '</div>' +
+      (job.git && job.git.prUrl ? '<div class="msg ok" style="display:block">PR opened: <a href="' + job.git.prUrl + '">' + job.git.prUrl + '</a></div>' : '') +
+      (job.git && job.git.error ? '<div class="msg err" style="display:block">' + escapeHtml(job.git.error) + '</div>' : '') +
+      '<details><summary>PR body</summary><pre>' + escapeHtml(r.pr.body) + '</pre></details></div>';
+  }
+  if (r.diff) {
+    body += '<div class="detail-block"><details open><summary>Diff</summary><pre>' + escapeHtml(r.diff) + '</pre></details></div>';
+  }
+  if (r.logs && r.logs.length) {
+    body += '<div class="detail-block"><details><summary>Log</summary><pre>' + escapeHtml(r.logs.join('\n')) + '</pre></details></div>';
+  }
+  $('jdBody').innerHTML = body;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/* ---------------- boot ---------------- */
+
+(async function boot() {
+  try {
+    const data = await api('/api/me');
+    me = data.user;
+    enterApp();
+  } catch (err) {
+    show($('authView'), true);
+    setAuthMode('login');
+  }
+})();
+</script>
+</body>
+</html>

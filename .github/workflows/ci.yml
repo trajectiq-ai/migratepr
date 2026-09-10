@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [18, 20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm install --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Smoke — demo migration (dry run)
+        run: node dist/src/demo.js
+      - name: Smoke — CLI exit codes
+        shell: bash
+        run: |
+          node dist/src/cli.js --version
+          node dist/src/cli.js --list-tracks
+          # diff-review path (no test script) must exit 2
+          DEMO=$(mktemp -d)
+          echo '{"name":"x","dependencies":{"stripe":"^12.18.0"}}' > "$DEMO/package.json"
+          set +e
+          node dist/src/cli.js --repo "$DEMO" --engine rules >/dev/null 2>&1
+          code=$?
+          set -e
+          test "$code" -eq 2 || { echo "expected exit 2, got $code"; exit 1; }

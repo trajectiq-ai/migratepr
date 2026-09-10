@@ -1,0 +1,103 @@
+name: 'MigratePR'
+description: >
+  Open a test-verified migration PR when a repo pins an old Stripe SDK/API version.
+  Runs the deterministic rule engine; set ANTHROPIC_API_KEY to enable LLM-assisted rewrites.
+author: 'MigratePR'
+
+inputs:
+  repo:
+    description: 'Path to the repository (defaults to the workspace)'
+    required: false
+    default: '.'
+  track:
+    description: 'Migration track id (default: auto-detect from package.json)'
+    required: false
+  engine:
+    description: 'rules | llm | auto'
+    required: false
+    default: 'rules'
+  push:
+    description: 'Open the PR (branch + commit + push + gh pr create). Requires github-token and GH_TOKEN for gh.'
+    required: false
+    default: 'false'
+  github-token:
+    description: 'Token used for git push / gh pr create when push=true'
+    required: false
+    default: ''
+  pr-base:
+    description: 'Base branch for the PR'
+    required: false
+    default: ''
+  exclude:
+    description: 'Newline-separated exclude globs'
+    required: false
+    default: ''
+  out:
+    description: 'Where to write the JSON report'
+    required: false
+    default: 'migratepr-report.json'
+
+outputs:
+  status:
+    description: 'migrated | aborted | diff-review'
+    value: ${{ steps.migrate.outputs.status }}
+  report:
+    description: 'Path to the JSON report'
+    value: ${{ steps.migrate.outputs.report }}
+
+runs:
+  using: 'composite'
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 20
+    - name: Install MigratePR
+      shell: bash
+      run: npm install --no-audit --no-fund
+    - name: Build
+      shell: bash
+      run: npm run build
+    - name: Run MigratePR
+      id: migrate
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ env.ANTHROPIC_API_KEY }}
+      run: |
+        ARGS="--repo ${{ inputs.repo }} --engine ${{ inputs.engine }} --json --out ${{ inputs.out }}"
+        if [ -n "${{ inputs.track }}" ]; then ARGS="$ARGS --track ${{ inputs.track }}"; fi
+        if [ -n "${{ inputs.pr-base }}" ]; then ARGS="$ARGS --pr-base ${{ inputs.pr-base }}"; fi
+        if [ -n "${{ inputs.exclude }}" ]; then
+          while IFS= read -r g; do
+            [ -n "$g" ] && ARGS="$ARGS --exclude $g"
+          done <<< "${{ inputs.exclude }}"
+        fi
+        set +e
+        node dist/src/cli.js $ARGS
+        code=$?
+        set -e
+        STATUS=$(node -e "const r=require('./${{ inputs.out }}');console.log(r.status)")
+        echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+        echo "report=${{ inputs.out }}" >> "$GITHUB_OUTPUT"
+        # exit 1 (aborted) is a valid CI outcome: the gate did its job.
+        if [ "$code" -eq 3 ]; then exit 3; fi
+        exit 0
+    - name: Open PR
+      if: ${{ inputs.push == 'true' && steps.migrate.outputs.status == 'migrated' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        REPORT="${{ inputs.out }}"
+        BRANCH=$(node -e "const r=require('./$REPORT');console.log(r.pr.branch)")
+        TITLE=$(node -e "const r=require('./$REPORT');console.log(r.pr.title)")
+        git checkout -b "$BRANCH"
+        git add -A
+        git commit -m "$TITLE"
+        git push -u origin "$BRANCH"
+        node -e "
+          const fs=require('fs');
+          const r=require('./$REPORT');
+          fs.writeFileSync('migratepr-body.md', r.pr.body);
+        "
+        gh pr create --title "$TITLE" --body-file migratepr-body.md --base "${{ inputs.pr-base }}"
+        git checkout -
