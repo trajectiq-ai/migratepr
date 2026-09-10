@@ -59,6 +59,7 @@ async function call(
   const res = await fetch(baseUrl + path, {
     method,
     headers: {
+      'Connection': 'close', // avoid undici keep-alive races with per-test servers
       ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
       ...(cookie ? { cookie } : {}),
     },

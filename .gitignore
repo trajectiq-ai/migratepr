@@ -1,4 +1,8 @@
 node_modules/
+# The checkout-demo ships tiny, explicitly-marked test stubs under its own
+# node_modules (real SDK/runner would hit the network in CI). Keep them tracked.
+!examples/checkout-demo/node_modules/
+!examples/checkout-demo/node_modules/**
 dist/
 artifacts/
 *.log
