@@ -23,6 +23,7 @@ import * as path from 'path';
 import { bold, cyan, dim, green, yellow } from './ansi';
 import { PROVIDERS } from './web/providers';
 import { OLLAMA_DEFAULT_MODEL, pickPreferredOllamaModel } from './providers/ollama';
+import { SMALL_PULL_MODEL, pullCommandFor } from './model';
 
 /* ------------------------------ known runtimes ------------------------------ */
 
@@ -366,15 +367,32 @@ export interface Recommendation {
  * either already supported by the engine or is a generic OpenAI-compatible
  * endpoint the engine can talk to today.
  */
-export function buildRecommendations(platform: NodeJS.Platform = process.platform): Recommendation[] {
+export function buildRecommendations(
+  platform: NodeJS.Platform = process.platform,
+  opts: { ollamaInstalled?: boolean } = {},
+): Recommendation[] {
   const os = platform === 'win32' ? 'windows' : platform === 'darwin' ? 'macOS' : 'linux';
   const ollama = LOCAL_RUNTIMES[0];
+  // Already installed and only stopped? Then "start it" is the whole task —
+  // telling that user to install it again is the fastest way to lose them.
+  const ollamaSteps = opts.ollamaInstalled
+    ? [
+        'ollama serve                         # you already have it — just start it',
+        pullCommandFor(OLLAMA_DEFAULT_MODEL),
+        `Small machine? ${pullCommandFor(SMALL_PULL_MODEL)}   (~1 GB instead of ~4.7 GB)`,
+      ]
+    : [
+        `Install:  ${ollama.install[os as 'windows' | 'macOS' | 'linux']}`,
+        pullCommandFor(OLLAMA_DEFAULT_MODEL),
+        'ollama serve                         # if it is not already running',
+        `Small machine? ${pullCommandFor(SMALL_PULL_MODEL)}   (~1 GB instead of ~4.7 GB)`,
+      ];
   const setKey =
     platform === 'win32'
       ? 'setx GROQ_API_KEY "gsk_your_key_here"   (open a new terminal afterwards)'
       : 'export GROQ_API_KEY=gsk_your_key_here    (add to ~/.bashrc or ~/.zshrc to persist)';
 
-  return [
+  const rest: Recommendation[] = [
     {
       id: 'none-needed',
       title: 'Start here: do nothing (no LLM required)',
@@ -417,12 +435,7 @@ export function buildRecommendations(platform: NodeJS.Platform = process.platfor
         'The best option for private code: runs on your hardware, needs no account, works offline, ' +
         'and costs nothing. Recommended if your code cannot be sent to a third party. A 7B code ' +
         'model is enough for whole-file rewrites.',
-      steps: [
-        `Install:  ${ollama.install[os as 'windows' | 'macOS' | 'linux']}`,
-        'ollama pull qwen2.5-coder:7b        # ~4.7 GB, one time',
-        'ollama serve                         # usually already running after install',
-        'migratepr doctor                     # auto-detects and saves it as the default',
-      ],
+      steps: ollamaSteps,
       url: ollama.docsUrl,
     },
     {
@@ -439,6 +452,14 @@ export function buildRecommendations(platform: NodeJS.Platform = process.platfor
       url: 'https://github.com/trajectiq-ai/migratepr#llm-engine',
     },
   ];
+
+  // An installed-but-stopped Ollama is the shortest path to a working LLM, so
+  // promote it right after "do nothing" instead of leaving it fourth.
+  const ollamaRec = rest.find(r => r.id === 'ollama');
+  if (opts.ollamaInstalled && ollamaRec) {
+    return [rest[0], ollamaRec, ...rest.filter(r => r.id !== 'ollama' && r.id !== 'none-needed')];
+  }
+  return rest;
 }
 
 /* --------------------------------- the run --------------------------------- */
@@ -541,6 +562,7 @@ export function formatDoctorReport(report: DoctorReport): string {
   }
   for (const s of report.installedButStopped) {
     out.push(`  ${yellow('!')} ${s.name.padEnd(22)} ${dim('installed but not running')}`);
+    if (s.id === 'ollama') out.push(dim(`      start it:  ollama serve`));
   }
 
   out.push('\n' + bold('Cloud API keys in this environment'));
@@ -634,7 +656,11 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
   }
 
   const effective = describeEffective(cloudKeys, saved, discovery.reachable);
-  const recommendations = effective ? [] : buildRecommendations(platform);
+  const recommendations = effective
+    ? []
+    : buildRecommendations(platform, {
+        ollamaInstalled: discovery.installedButStopped.some(s => s.id === 'ollama'),
+      });
 
   return {
     reachable: discovery.reachable,

@@ -7,6 +7,21 @@ import { generateRulesFromGuide, smokeTestTrack } from './rulegen';
 import { makeLlmProvider } from './engine';
 import { buildAppManifest } from './github-app';
 import { runDoctor, formatDoctorReport, DoctorReport } from './doctor';
+import {
+  DEFAULT_PULL_MODEL,
+  SMALL_PULL_MODEL,
+  OllamaUnavailableError,
+  formatMissingOllama,
+  formatModelList,
+  formatPullDone,
+  formatPullProgress,
+  isInstalled,
+  listLocalModels,
+  ollamaHost,
+  pullCommandFor,
+  pullModel,
+  preferredLocalModel,
+} from './model';
 import { loadConfig } from './config';
 import { bold, cyan, dim, green, red, yellow } from './ansi';
 
@@ -97,6 +112,8 @@ function usage(): void {
 
 Usage:
   migratepr doctor [--json]                 # detect local LLMs and set a default
+  migratepr model [list]                    # local models, and one command to get one
+  migratepr model pull [tag]                # download a free local model (Ollama)
   migratepr --repo <path> [options]
   migratepr watch --repo <path> [options]   # self-maintaining loop
   migratepr rulegen --guide <file> …        # migration guide → validated rules
@@ -145,6 +162,9 @@ async function main(): Promise<number> {
   }
   if (argv[0] === 'doctor') {
     return runDoctorCli(argv.slice(1));
+  }
+  if (argv[0] === 'model') {
+    return runModelCli(argv.slice(1));
   }
   let args: ParsedArgs;
   try {
@@ -554,6 +574,147 @@ async function runDoctorCli(argv: string[]): Promise<number> {
 
   console.log(formatDoctorReport(report));
   return EXIT.OK;
+}
+
+/* -------------------------------- model CLI -------------------------------- */
+
+function modelUsage(): void {
+  console.log(`migratepr model — get a free local LLM in one command
+
+Usage:
+  migratepr model [list]                 List installed local models
+  migratepr model pull [tag]             Download a model through Ollama
+
+With no local model, the deterministic rules engine still migrates the
+mechanical changes — the LLM is only consulted for the rest. This command is
+the fastest way to close that gap without an API key or an account.
+
+Flags:
+  --host <url>           Ollama host (default: http://127.0.0.1:11434, or OLLAMA_HOST)
+  --small                Pull the small model (~1 GB) instead of the default (~4.7 GB)
+  --json                 Machine-readable output
+  -h, --help             Show this help
+
+Examples:
+  migratepr model pull                    # qwen2.5-coder:7b
+  migratepr model pull --small            # qwen2.5-coder:1.5b
+  migratepr model pull llama3.2:3b        # any Ollama tag
+`);
+}
+
+async function runModelCli(argv: string[]): Promise<number> {
+  const positional: string[] = [];
+  let host: string | undefined;
+  let json = false;
+  let small = false;
+  let help = false;
+  const needValue = (flag: string): string => {
+    const v = argv[++i];
+    if (v === undefined) throw new Error(`missing value for ${flag}`);
+    return v;
+  };
+  let i = 0;
+  for (; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--host') host = needValue(a);
+    else if (a === '--json') json = true;
+    else if (a === '--small') small = true;
+    else if (a === '--help' || a === '-h') help = true;
+    else if (a.startsWith('-')) throw new Error(`unknown model flag: ${a}`);
+    else positional.push(a);
+  }
+  if (help) return modelUsage(), EXIT.OK;
+
+  const action = positional[0] ?? 'list';
+  if (action !== 'list' && action !== 'pull') {
+    console.error(red(`unknown model action '${action}' — use: list, pull`));
+    modelUsage();
+    return EXIT.USAGE;
+  }
+  if (action === 'list' && positional.length > 1) {
+    console.error(red(`unexpected argument '${positional[1]}' — 'model list' takes no arguments`));
+    return EXIT.USAGE;
+  }
+
+  const tag = positional[1] ?? (small ? SMALL_PULL_MODEL : DEFAULT_PULL_MODEL);
+
+  if (action === 'list') {
+    let models;
+    try {
+      models = await listLocalModels({ host });
+    } catch (err) {
+      if (err instanceof OllamaUnavailableError) {
+        if (json) console.log(JSON.stringify({ error: err.message, ollama: false }, null, 2));
+        else console.log(formatMissingOllama());
+        return EXIT.USAGE;
+      }
+      throw err;
+    }
+    // Same ranking the engine uses — a "preferred" label must never mislead.
+    const preferred = preferredLocalModel(models);
+    if (json) {
+      console.log(JSON.stringify({ host: ollamaHost(host), models, preferred }, null, 2));
+      return EXIT.OK;
+    }
+    console.log(formatModelList(models, { host, preferred }));
+    // Only nag when nothing code-tuned is installed: MigratePR rewrites whole
+    // files, and general chat models make that worse.
+    if (!/coder|code[-_]/i.test(preferred)) {
+      console.log(dim('\n  MigratePR reads and writes whole files — a code-tuned model gives the best results.'));
+      console.log(dim(`  Get one:  ${pullCommandFor()}   (~4.7 GB)  or  migratepr model pull --small  (~1 GB)`));
+    }
+    return EXIT.OK;
+  }
+
+  // `pull` — skip a redundant download, then stream real progress.
+  try {
+    const installed = await listLocalModels({ host });
+    if (isInstalled(installed, tag)) {
+      if (json) console.log(JSON.stringify({ model: tag, downloaded: false, alreadyInstalled: true }, null, 2));
+      else console.log(`${green('✔')} ${tag} is already installed — nothing to download.`);
+      return EXIT.OK;
+    }
+  } catch (err) {
+    if (err instanceof OllamaUnavailableError) {
+      if (json) console.log(JSON.stringify({ error: err.message, ollama: false }, null, 2));
+      else console.log(formatMissingOllama());
+      return EXIT.USAGE;
+    }
+    throw err;
+  }
+
+  const live = process.stdout.isTTY && !json;
+  const seen = new Set<string>();
+  if (!json) console.log(`Pulling ${bold(tag)} …  ${dim('(Ctrl-C is safe — Ollama resumes where it stopped)')}`);
+
+  try {
+    const result = await pullModel(tag, {
+      host,
+      onProgress: p => {
+        if (json) return;
+        const line = formatPullProgress(p);
+        if (live) {
+          process.stdout.write(`\r  ${line}`.padEnd(process.stdout.columns ?? 80));
+        } else if (!seen.has(line)) {
+          // Non-TTY (CI, redirected output): one line per distinct status.
+          seen.add(line);
+          console.log(`  ${line}`);
+        }
+      },
+    });
+    if (json) {
+      console.log(JSON.stringify({ model: result.model, downloaded: result.downloaded, events: result.events }, null, 2));
+      return EXIT.OK;
+    }
+    if (live) process.stdout.write('\r' + ' '.repeat(process.stdout.columns ?? 80) + '\r');
+    console.log(formatPullDone(result.model));
+    return EXIT.OK;
+  } catch (err) {
+    if (live) process.stdout.write('\n');
+    console.error(red(`pull failed: ${(err as Error).message}`));
+    if (err instanceof OllamaUnavailableError) console.log(formatMissingOllama());
+    return EXIT.ABORTED;
+  }
 }
 
 /* ------------------------------- watch mode ------------------------------- */

@@ -277,6 +277,7 @@ The `--repo` path may be relative or absolute.
 |---|---|
 | `migratepr` | One migration run (flags above) |
 | `migratepr doctor` | Detect local LLMs, save a default, or print free setup options |
+| `migratepr model` | List local models, or download a free one (`pull`) in one command |
 | `migratepr watch` | Self-maintaining loop over one or more repos |
 | `migratepr rulegen` | Generate + validate rules from an official migration guide |
 | `migratepr github-app` | Print the GitHub App manifest |
@@ -367,6 +368,43 @@ When nothing is available, doctor recommends the following — and **option 1 is
 Most migrations are mechanical, so MigratePR needs no LLM at all: the model is only consulted for changes a rule cannot express, and those findings are *skipped* — never guessed — when no provider is configured. Doctor says so plainly rather than pressuring the customer into a download.
 
 Discovery never installs anything, never sends data anywhere, and never writes a credential — only a provider name, a base URL, and a model name.
+
+### Getting one in a single command (`migratepr model`)
+
+Doctor tells you *what is on the machine* and *what to run*. `migratepr model` does the second half for you — the whole local-LLM setup is one command, with no API key, no account, and nothing to configure afterwards:
+
+```bash
+migratepr model                 # what is installed, and which one MigratePR would use
+migratepr model pull            # download the model the engine prefers (qwen2.5-coder:7b)
+migratepr model pull --small    # ~1 GB instead of ~4.7 GB, for modest laptops
+migratepr model pull llama3.2:3b   # …or any Ollama tag
+migratepr model list --json     # machine-readable, for installers
+```
+
+Real output (a fresh pull, straight from the terminal):
+
+```text
+Pulling qwen2.5-coder:0.5b …  (Ctrl-C is safe — Ollama resumes where it stopped)
+  pulling 20693aeb02c6 91% (347 MB / 379 MB)
+  pulling 20693aeb02c6 100% (379 MB / 379 MB)
+  verifying sha256 digest
+  writing manifest
+  success
+
+✔ qwen2.5-coder:0.5b is ready.
+  MigratePR will find it automatically on the next run (or run "migratepr doctor").
+```
+
+Details that make it trustworthy rather than a wrapper around one HTTP call:
+
+- **Idempotent.** Pulling a tag you already have says "already installed" and downloads nothing.
+- **Live progress on a TTY, one line per status when piped** — so it is readable in CI logs and in a script, not just interactively.
+- **Real byte-level progress** parsed from Ollama's NDJSON stream, including the multi-digest stages (`pulling manifest` → per-layer `downloading` → `verifying sha256 digest` → `writing manifest`).
+- **Ollama's own errors, not ours.** `model pull nope:1b` reports `model "nope:1b" not found` and points at the library index; a dead daemon reports `no Ollama server answered at … — install it, or start it with "ollama serve"`.
+- **The "preferred" label cannot lie.** `model list` marks the model using the *same* ranking function the engine calls at run time, so it can never nominate a model the next migration would not actually pick.
+- **Nothing is installed for you.** If Ollama is absent, the command prints the exact per-platform install command and starts the free-option guidance — it never runs a package manager on the customer's behalf.
+
+**Why a bundled model was considered and rejected.** Shipping a 300 MB–2 GB quantized model inside the package via `node-llama-cpp` would remove the separate runtime, but it would add gigabytes and per-platform native binaries to a tool whose core is deterministic and whose LLM use is *optional* — for a feature most users never need. Provisioning through Ollama keeps the package small, keeps one copy of the weights for the whole machine, and stays pure HTTP, which is why it is fully testable against a fake server and needs no toolchain to build.
 
 ## LLM engine
 
