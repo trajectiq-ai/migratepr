@@ -3,8 +3,9 @@ import { join } from 'path';
 import { MigrationTrack, MigrateprConfig } from '../types';
 import { STRIPE_TRACKS } from './stripe';
 import { EXPRESS_TRACKS } from './express';
+import { OPENAI_TRACKS } from './openai';
 
-export const TRACKS: MigrationTrack[] = [...STRIPE_TRACKS, ...EXPRESS_TRACKS];
+export const TRACKS: MigrationTrack[] = [...STRIPE_TRACKS, ...EXPRESS_TRACKS, ...OPENAI_TRACKS];
 
 export function getTrack(id: string): MigrationTrack {
   const track = TRACKS.find(t => t.id === id);

@@ -168,8 +168,10 @@ export async function llmRewrite(
   // Validate that the required change actually happened before writing.
   const required: string[] = [];
   if (rule.kind === 'method-rename') required.push(`.${rule.to}(`);
+  if (rule.kind === 'method-move') required.push(`.${rule.to}(`);
   if (rule.kind === 'param-rename') required.push(rule.to);
   if (rule.kind === 'api-version') required.push(`'${rule.to}'`);
+  if (rule.kind === 'client-constructor') required.push(`new ${rule.to}(`);
   if (required.some(token => !code.includes(token))) {
     throw new Error(
       `LLM output rejected (missing expected change) for ${finding.file}:${finding.line}`,

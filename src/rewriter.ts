@@ -15,7 +15,9 @@ import {
 import {
   ApiVersionRule,
   Finding,
+  MethodMoveRule,
   MethodRenameRule,
+  MigrationRule,
   MockMethodKeyRule,
   ParamRenameRule,
   RewriteResult,
@@ -41,7 +43,7 @@ export class Rewriter {
   }
 
   apply(
-    rule: MethodRenameRule | ParamRenameRule | ApiVersionRule | MockMethodKeyRule,
+    rule: MigrationRule,
     finding: Finding,
     repoPath: string,
   ): RewriteResult | null {
@@ -61,9 +63,11 @@ export class Rewriter {
 
     let after: string | null = null;
     if (rule.kind === 'method-rename') after = this.applyMethodRename(rule, finding, source);
+    else if (rule.kind === 'method-move') after = this.applyMethodMove(rule, finding, source);
     else if (rule.kind === 'param-rename') after = this.applyParamRename(rule, finding, source);
     else if (rule.kind === 'mock-method-key') after = this.applyMockKey(rule, finding, source);
-    else after = this.applyApiVersion(rule, finding, source);
+    else if (rule.kind === 'api-version') after = this.applyApiVersion(rule, finding, source);
+    else return null; // client-constructor / sdk-bump: never deterministic
 
     if (after === null || after === finding.snippet) return null;
     source.saveSync();
@@ -167,6 +171,32 @@ export class Rewriter {
       const nameNode = init.getNameNode();
       nameNode.replaceWithText(rule.to);
       return decl.getText();
+    }
+    return null;
+  }
+
+  /**
+   * Move a client-level method into a namespaced resource, e.g.
+   * `openai.createCompletion(...)` → `openai.completions.create(...)`.
+   * Works for calls and value-position references (bindings, assertions).
+   */
+  private applyMethodMove(
+    rule: MethodMoveRule,
+    finding: Finding,
+    source: SourceFile,
+  ): string | null {
+    const call = this.locateCall(source, finding);
+    if (call) {
+      const expr = call.getExpression();
+      if (!Node.isPropertyAccessExpression(expr) || expr.getName() !== rule.from) return null;
+      expr.replaceWithText(`${expr.getExpression().getText()}.${rule.to}`);
+      return call.getText();
+    }
+    const pae = this.locatePropertyAccess(source, finding);
+    if (pae) {
+      if (pae.getName() !== rule.from) return null;
+      pae.replaceWithText(`${pae.getExpression().getText()}.${rule.to}`);
+      return pae.getText();
     }
     return null;
   }

@@ -15,7 +15,7 @@ import { loadConfig } from './config';
 import { Scanner } from './scanner';
 import { Rewriter } from './rewriter';
 import { bumpSdkDependencies } from './bump';
-import { ensureDependencies, resolveVerifyCommand, runTests } from './verify';
+import { ensureDependencies, resolveGateCommands, resolveVerifyCommand, runTests } from './verify';
 import { makeLlmProvider, llmRewrite, NO_PROVIDER_HINT } from './engine';
 
 const BRANCH_PREFIX = 'migratepr';
@@ -53,7 +53,7 @@ function isGitTreeClean(repoPath: string): boolean {
 function resolveSettings(
   repoPath: string,
   opts: MigrateOptions,
-): { trackId?: string; customTracks?: MigrationTrack[]; engine: 'rules' | 'llm' | 'auto'; skipRuleIds: string[]; excludePatterns: string[]; verifyCommand?: string; verifyTimeoutMs: number; install: boolean; prBase?: string; logs: string[] } {
+): { trackId?: string; customTracks?: MigrationTrack[]; engine: 'rules' | 'llm' | 'auto'; skipRuleIds: string[]; excludePatterns: string[]; verifyCommand?: string; verifyTimeoutMs: number; verifyGates: string[]; install: boolean; prBase?: string; logs: string[] } {
   const { config, file, error } = loadConfig(repoPath);
   const logs: string[] = [];
   if (error) throw new Error(`${error} (${file})`);
@@ -68,6 +68,7 @@ function resolveSettings(
     excludePatterns: [...new Set([...(opts.excludePatterns ?? []), ...(cfg.exclude ?? [])])],
     verifyCommand: opts.verifyCommand ?? cfg.verifyCommand,
     verifyTimeoutMs: opts.verifyTimeoutMs ?? cfg.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
+    verifyGates: [...new Set([...(opts.verifyGates ?? []), ...(cfg.verifyGates ?? [])])],
     install: opts.install ?? cfg.install ?? false,
     prBase: opts.prBase ?? cfg.prBase,
     logs,
@@ -174,6 +175,40 @@ export async function migrate(opts: MigrateOptions): Promise<MigrateReport> {
     };
   }
 
+  // Deeper gates (typecheck/build/lint) also run at baseline — a repo that
+  // does not even typecheck has no business being migrated. Gates whose npm
+  // script is missing are skipped with a log note, not an error.
+  const gateCommands =
+    settings.verifyGates.length > 0 ? resolveGateCommands(repoPath, settings.verifyGates) : [];
+  for (const name of settings.verifyGates) {
+    if (!gateCommands.some(g => g.name === name)) {
+      logs.push(`verify gate '${name}' has no npm script in package.json — skipped`);
+    }
+  }
+  const baselineGates = gateCommands.map(g =>
+    runTests(repoPath, 'baseline', {
+      verifyFn: opts.verifyFn,
+      verifyCommand: g.command,
+      timeoutMs: settings.verifyTimeoutMs,
+    }),
+  );
+  const failedBaselineGate = baselineGates.findIndex(g => !g.ok);
+  if (failedBaselineGate >= 0) {
+    return {
+      status: 'aborted',
+      reason: `Baseline gate '${gateCommands[failedBaselineGate].name}' failed — fix the repo before migrating.`,
+      track,
+      findings: scan.findings,
+      rewrites: [],
+      skipped: [],
+      baseline,
+      post: null,
+      diff: null,
+      pr: null,
+      logs,
+    };
+  }
+
   const branch = branchNameFor(track.id);
   const prBuilder = new PrPayloadBuilder(track, branch, settings.prBase);
   const snapshot = takeSnapshot(repoPath);
@@ -235,17 +270,41 @@ export async function migrate(opts: MigrateOptions): Promise<MigrateReport> {
     ensureDependencies(repoPath, true);
   }
 
-  // 4. Verify — run the repo's own suite against the rewritten code.
+  // 4. Verify — run the repo's own suite (and any gates) against the new code.
   const post = runTests(repoPath, 'post-migration', {
     verifyFn: opts.verifyFn,
     verifyCommand: settings.verifyCommand,
     timeoutMs: settings.verifyTimeoutMs,
   });
+  const postGates = gateCommands.map(g =>
+    runTests(repoPath, 'post-migration', {
+      verifyFn: opts.verifyFn,
+      verifyCommand: g.command,
+      timeoutMs: settings.verifyTimeoutMs,
+    }),
+  );
   if (!post.ok) {
     restoreSnapshot(repoPath, snapshot);
     return {
       status: 'aborted',
       reason: 'Post-migration tests failed — all changes reverted, no PR opened.',
+      track,
+      findings: scan.findings,
+      rewrites,
+      skipped,
+      baseline,
+      post,
+      diff: null,
+      pr: null,
+      logs,
+    };
+  }
+  const failedPostGate = postGates.findIndex(g => !g.ok);
+  if (failedPostGate >= 0) {
+    restoreSnapshot(repoPath, snapshot);
+    return {
+      status: 'aborted',
+      reason: `Post-migration gate '${gateCommands[failedPostGate].name}' failed — all changes reverted, no PR opened.`,
       track,
       findings: scan.findings,
       rewrites,
@@ -279,6 +338,12 @@ export async function migrate(opts: MigrateOptions): Promise<MigrateReport> {
     diff,
     pr,
     logs,
+    gates: gateCommands.map((g, i) => ({
+      name: g.name,
+      command: g.command,
+      baseline: baselineGates[i],
+      post: postGates[i],
+    })),
   };
 }
 

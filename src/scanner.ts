@@ -10,8 +10,10 @@ import {
   SyntaxKind,
 } from 'ts-morph';
 import {
+  ClientConstructorRule,
   ExportedClient,
   Finding,
+  MethodMoveRule,
   MethodRenameRule,
   MigrationTrack,
   MockMethodKeyRule,
@@ -87,9 +89,15 @@ export class Scanner {
     const methodRules = track.rules.filter(
       (r): r is MethodRenameRule => r.kind === 'method-rename',
     );
+    const methodMoveRules = track.rules.filter(
+      (r): r is MethodMoveRule => r.kind === 'method-move',
+    );
     const paramRules = track.rules.filter((r): r is ParamRenameRule => r.kind === 'param-rename');
     const apiVersionRules = track.rules.filter(r => r.kind === 'api-version');
     const mockRules = track.rules.filter((r): r is MockMethodKeyRule => r.kind === 'mock-method-key');
+    const constructorRules = track.rules.filter(
+      (r): r is ClientConstructorRule => r.kind === 'client-constructor',
+    );
     // A trailing '/' means "this directory" — expand it to include contents.
     const excludes = excludePatterns.map(p =>
       p.endsWith('/') ? globToRegExp(`${p}**`) : globToRegExp(p),
@@ -153,6 +161,11 @@ export class Scanner {
             findings.push(this.makeFinding(nextId(), rule.id, rule.kind, info.rel, call, info.file));
           }
         }
+        for (const rule of methodMoveRules) {
+          if (rule.fromResource === resource && rule.from === method) {
+            findings.push(this.makeFinding(nextId(), rule.id, rule.kind, info.rel, call, info.file));
+          }
+        }
         for (const rule of paramRules) {
           if (rule.resource !== resource) continue;
           if (rule.method !== undefined && rule.method !== method) continue;
@@ -166,16 +179,24 @@ export class Scanner {
       }
 
       for (const ne of info.file.getDescendantsOfKind(SyntaxKind.NewExpression)) {
-        if (!info.classNames.has(ne.getExpression().getText())) continue;
+        const ctorName = ne.getExpression().getText();
+        if (!info.classNames.has(ctorName)) continue;
         const opts = ne.getArguments()[1];
-        if (!opts || !Node.isObjectLiteralExpression(opts)) continue;
-        const prop = opts.getProperty('apiVersion');
-        if (!prop || !Node.isPropertyAssignment(prop)) continue;
-        const init = prop.getInitializer();
-        if (!init || !Node.isStringLiteral(init)) continue;
-        const rule = apiVersionRules.find(r => r.from === init.getLiteralText());
-        if (rule) {
-          findings.push(this.makeFinding(nextId(), rule.id, rule.kind, info.rel, ne, info.file));
+        if (opts && Node.isObjectLiteralExpression(opts)) {
+          const prop = opts.getProperty('apiVersion');
+          if (prop && Node.isPropertyAssignment(prop)) {
+            const init = prop.getInitializer();
+            if (init && Node.isStringLiteral(init)) {
+              const rule = apiVersionRules.find(r => r.from === init.getLiteralText());
+              if (rule) {
+                findings.push(this.makeFinding(nextId(), rule.id, rule.kind, info.rel, ne, info.file));
+              }
+            }
+          }
+        }
+        const ctorRule = constructorRules.find(r => r.from === ctorName);
+        if (ctorRule) {
+          findings.push(this.makeFinding(nextId(), ctorRule.id, ctorRule.kind, info.rel, ne, info.file));
         }
       }
 
@@ -193,6 +214,12 @@ export class Scanner {
         const method = chain[chain.length - 1];
         for (const rule of methodRules) {
           if (rule.resource === resource && rule.from === method) {
+            findings.push(this.makeFinding(nextId(), rule.id, rule.kind, info.rel, pae, info.file));
+            break;
+          }
+        }
+        for (const rule of methodMoveRules) {
+          if (rule.fromResource === resource && rule.from === method) {
             findings.push(this.makeFinding(nextId(), rule.id, rule.kind, info.rel, pae, info.file));
             break;
           }
@@ -258,21 +285,32 @@ export class Scanner {
 
     for (const stmt of source.getVariableStatements()) {
       for (const decl of stmt.getDeclarationList().getDeclarations()) {
-        if (!Node.isIdentifier(decl.getNameNode())) continue;
-        const name = decl.getName();
         const init = decl.getInitializer();
         if (!init) continue;
+        const nameNode = decl.getNameNode();
+
+        if (Node.isCallExpression(init) && init.getExpression().getText() === 'require') {
+          const arg = init.getArguments()[0];
+          if (arg && Node.isStringLiteral(arg) && arg.getLiteralText() === sdkModule) {
+            // `const stripe = require('stripe')` → the binding is a client.
+            // `const { Configuration, OpenAIApi } = require('openai')` → every
+            // destructured name is an SDK class (openai v3 style).
+            if (Node.isIdentifier(nameNode)) {
+              classNames.add(nameNode.getText());
+            } else if (Node.isObjectBindingPattern(nameNode)) {
+              for (const el of nameNode.getElements()) {
+                classNames.add(el.getNameNode().getText());
+              }
+            }
+          }
+          continue;
+        }
+        if (!Node.isIdentifier(nameNode)) continue;
+        const name = nameNode.getText();
 
         if (Node.isNewExpression(init)) {
           // `const stripe = new Stripe(key, {…})`
           if (classNames.has(init.getExpression().getText())) classNames.add(name);
-          continue;
-        }
-        if (Node.isCallExpression(init) && init.getExpression().getText() === 'require') {
-          const arg = init.getArguments()[0];
-          if (arg && Node.isStringLiteral(arg) && arg.getLiteralText() === sdkModule) {
-            classNames.add(name);
-          }
           continue;
         }
         if (Node.isCallExpression(init)) {

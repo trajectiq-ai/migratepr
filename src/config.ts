@@ -91,16 +91,24 @@ export function validateConfig(raw: unknown): MigrateprConfig {
     if (!Array.isArray(cfg.tracks)) throw new Error("'tracks' must be an array of track objects");
     out.tracks = cfg.tracks.map(parseTrack);
   }
+  if (cfg.verifyGates !== undefined) {
+    if (!Array.isArray(cfg.verifyGates) || cfg.verifyGates.some(g => typeof g !== 'string' || g.trim().length === 0)) {
+      throw new Error("'verifyGates' must be an array of npm script names (strings)");
+    }
+    out.verifyGates = cfg.verifyGates;
+  }
   return out;
 }
 
 /* --------------------------- JSON rule DSL (tracks) --------------------------- */
 
-const RULE_KINDS = new Set([
+export const RULE_KINDS = new Set([
   'method-rename',
+  'method-move',
   'param-rename',
   'api-version',
   'mock-method-key',
+  'client-constructor',
   'sdk-bump',
 ]);
 
@@ -146,6 +154,15 @@ function parseRule(raw: unknown, trackId: string, index: number): MigrationRule 
     case 'method-rename':
     case 'mock-method-key':
       return { ...base, resource: str('resource', false) ?? '', from: str('from'), to: str('to') } as MigrationRule;
+    case 'method-move':
+      return {
+        ...base,
+        fromResource: str('fromResource', false) ?? '',
+        from: str('from'),
+        to: str('to'),
+      } as MigrationRule;
+    case 'client-constructor':
+      return { ...base, from: str('from'), to: str('to') } as MigrationRule;
     case 'param-rename':
       return {
         ...base,
@@ -164,8 +181,12 @@ function parseRule(raw: unknown, trackId: string, index: number): MigrationRule 
   }
 }
 
-/** Parse and validate one custom track from .migratepr.json. */
-function parseTrack(raw: unknown, trackIndex: number): MigrationTrack {
+/**
+ * Parse and validate one custom track from .migratepr.json (or rulegen
+ * output). Exported so the AI rule generator reuses the exact same
+ * structural validation as the config loader — no drift between formats.
+ */
+export function parseTrack(raw: unknown, trackIndex: number): MigrationTrack {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error(`tracks[${trackIndex}] must be an object`);
   }

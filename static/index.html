@@ -461,6 +461,9 @@ function renderJobDetail(job) {
       '<span class="stat"><b>' + r.track.id + '</b> <span class="muted">track</span></span>' +
     '</div>' +
     (r.baseline ? '<div class="muted">baseline: ' + r.baseline.ok + ' · post-migration: ' + (r.post ? r.post.ok : '—') + '</div>' : '') +
+    (r.gates && r.gates.length ? '<div class="muted" style="margin-top:6px">gates: ' +
+      r.gates.map(g => g.name + ' (baseline ' + (g.baseline.ok ? '✓' : '✗') + ' · post ' + (g.post.ok ? '✓' : '✗') + ')').join(' · ') +
+      '</div>' : '') +
     (r.reason ? '<div class="msg err" style="display:block">' + escapeHtml(r.reason) + '</div>' : '');
   $('jdSummary').innerHTML = summary;
 

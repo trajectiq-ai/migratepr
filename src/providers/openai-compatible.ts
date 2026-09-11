@@ -58,7 +58,11 @@ export class OpenAiCompatibleProvider implements LlmProvider {
           ...this.opts.extraBody,
         }),
       },
-      { timeoutMs: this.opts.timeoutMs ?? 120_000, attempts: this.opts.attempts ?? 3 },
+      {
+        // Global override for slow local runtimes (rulegen on CPU-bound Ollama).
+        timeoutMs: Number(process.env.MIGRATEPR_LLM_TIMEOUT_MS) || (this.opts.timeoutMs ?? 120_000),
+        attempts: this.opts.attempts ?? 3,
+      },
     );
     if (!res.ok) {
       const host = new URL(this.opts.baseUrl).host;

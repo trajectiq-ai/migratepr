@@ -35,6 +35,30 @@ export function resolveVerifyCommand(
 }
 
 /**
+ * Resolve extra verify gates (npm script names like typecheck/build/lint) to
+ * runnable commands. Only scripts that actually exist in the repo's
+ * package.json are returned — a missing gate is skipped, never an error.
+ */
+export function resolveGateCommands(
+  repoPath: string,
+  gateNames: string[],
+): Array<{ name: string; command: string }> {
+  if (gateNames.length === 0) return [];
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoPath, 'package.json'), 'utf8')) as {
+    scripts?: Record<string, string>;
+  };
+  const scripts = pkg.scripts ?? {};
+  const out: Array<{ name: string; command: string }> = [];
+  for (const name of gateNames) {
+    const script = scripts[name];
+    if (typeof script === 'string' && script.trim().length > 0) {
+      out.push({ name, command: `npm run ${name}` });
+    }
+  }
+  return out;
+}
+
+/**
  * Install dependencies only when they are required and missing (or when the
  * caller explicitly asks for a post-bump install). The demo repo ships a
  * committed stub under node_modules, so this is a no-op there.

@@ -3,6 +3,10 @@ import * as fs from 'fs';
 import { migrate } from './migrate';
 import { TRACKS } from './rules';
 import { watchCycle, watchLoop, WatchRepo, WatchResult } from './watch';
+import { generateRulesFromGuide, smokeTestTrack } from './rulegen';
+import { makeLlmProvider } from './engine';
+import { buildAppManifest } from './github-app';
+import { loadConfig } from './config';
 import { bold, cyan, dim, green, red, yellow } from './ansi';
 
 /** Exit codes (stable contract for CI): */
@@ -24,6 +28,7 @@ interface ParsedArgs {
   skipRules: string[];
   install?: boolean;
   verifyCommand?: string;
+  verifyGates: string[];
   timeoutMs?: number;
   requireGit: boolean;
   prBase?: string;
@@ -39,6 +44,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     json: false,
     excludes: [],
     skipRules: [],
+    verifyGates: [],
     requireGit: false,
     listTracks: false,
     version: false,
@@ -68,6 +74,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (a === '--install') parsed.install = true;
     else if (a === '--no-install') parsed.install = false;
     else if (a === '--verify-command') parsed.verifyCommand = needValue(a);
+    else if (a === '--gate') parsed.verifyGates.push(needValue(a));
     else if (a === '--timeout') {
       const v = Number(needValue(a));
       if (!Number.isFinite(v) || v <= 0) throw new Error('--timeout must be a positive number of ms');
@@ -104,6 +111,8 @@ Flags:
   --install            Run npm install after dependency bumps
   --no-install         Never run npm install (default)
   --verify-command <c> Override the verify command (default: package.json test script)
+  --gate <name>        Extra verify gate: an npm script (typecheck/build/lint) run at
+                       baseline and post-migration (repeatable)
   --timeout <ms>       Per-run verify timeout in ms (default: 600000)
   --require-git        Refuse to run outside a git checkout
   --pr-base <branch>   Base branch for PR delivery (default: branch HEAD had)
@@ -123,6 +132,12 @@ async function main(): Promise<number> {
   const argv = process.argv.slice(2);
   if (argv[0] === 'watch') {
     return runWatch(argv.slice(1));
+  }
+  if (argv[0] === 'rulegen') {
+    return runRulegen(argv.slice(1));
+  }
+  if (argv[0] === 'github-app') {
+    return runGithubApp(argv.slice(1));
   }
   let args: ParsedArgs;
   try {
@@ -151,6 +166,7 @@ async function main(): Promise<number> {
     excludePatterns: args.excludes,
     install: args.install,
     verifyCommand: args.verifyCommand,
+    verifyGates: args.verifyGates,
     verifyTimeoutMs: args.timeoutMs,
     requireGit: args.requireGit,
     prBase: args.prBase,
@@ -204,6 +220,12 @@ function printHuman(
         dim(` (${report.baseline.durationMs}ms, ${report.baseline.command})`),
     );
   }
+  for (const g of report.gates ?? []) {
+    console.log(
+      `Gate (${g.name}): baseline ${g.baseline.ok ? green('pass') : red('fail')} · post ${g.post.ok ? green('pass') : red('fail')}` +
+        dim(` (${g.command})`),
+    );
+  }
   if (report.post) {
     console.log(
       `Verify (${report.post.stage}): ${report.post.ok ? green('pass') : red('fail')}` +
@@ -244,6 +266,226 @@ function statusColored(status: string): string {
   if (status === 'migrated') return green(status);
   if (status === 'diff-review') return yellow(status);
   return red(status);
+}
+
+/* ------------------------------- rulegen ------------------------------- */
+
+interface RulegenArgs {
+  guide: string;
+  vendor: string;
+  sdk: string;
+  from: number;
+  to: number;
+  apiFrom?: string;
+  apiTo?: string;
+  id?: string;
+  guideUrl?: string;
+  repo?: string;
+  write: boolean;
+  maxRules: number;
+  json: boolean;
+  help: boolean;
+}
+
+function parseRulegenArgs(argv: string[]): RulegenArgs {
+  const parsed: RulegenArgs = {
+    guide: '',
+    vendor: '',
+    sdk: '',
+    from: 0,
+    to: 0,
+    write: false,
+    maxRules: 25,
+    json: false,
+    help: false,
+  };
+  const needValue = (flag: string): string => {
+    const v = argv[++i];
+    if (v === undefined) throw new Error(`missing value for ${flag}`);
+    return v;
+  };
+  let i = 0;
+  for (; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--guide') parsed.guide = needValue(a);
+    else if (a === '--vendor') parsed.vendor = needValue(a);
+    else if (a === '--sdk') parsed.sdk = needValue(a);
+    else if (a === '--from') parsed.from = Number(needValue(a));
+    else if (a === '--to') parsed.to = Number(needValue(a));
+    else if (a === '--api-from') parsed.apiFrom = needValue(a);
+    else if (a === '--api-to') parsed.apiTo = needValue(a);
+    else if (a === '--id') parsed.id = needValue(a);
+    else if (a === '--guide-url') parsed.guideUrl = needValue(a);
+    else if (a === '--repo') parsed.repo = needValue(a);
+    else if (a === '--max-rules') parsed.maxRules = Number(needValue(a));
+    else if (a === '--write') parsed.write = true;
+    else if (a === '--json') parsed.json = true;
+    else if (a === '--help' || a === '-h') parsed.help = true;
+    else throw new Error(`unknown rulegen flag: ${a}`);
+  }
+  if (parsed.help) return parsed;
+  if (!parsed.guide) throw new Error('rulegen needs --guide <file> (use "-" for stdin)');
+  if (!parsed.vendor) throw new Error('rulegen needs --vendor <name>');
+  if (!parsed.sdk) throw new Error('rulegen needs --sdk <npm-package>');
+  if (!Number.isInteger(parsed.from) || parsed.from <= 0 || !Number.isInteger(parsed.to) || parsed.to <= 0) {
+    throw new Error('rulegen needs integer --from and --to major versions');
+  }
+  return parsed;
+}
+
+function rulegenUsage(): void {
+  console.log(`migratepr v${VERSION} — AI rule generation from migration guides
+
+Usage:
+  migratepr rulegen --guide <file> --vendor <name> --sdk <pkg> --from <n> --to <n> [options]
+
+Reads an official vendor migration guide (markdown), asks the LLM engine for a
+structured rule set, validates it against the exact same schema as
+.migratepr.json tracks, and prints the track (or writes it to config).
+
+Flags:
+  --guide <file>   Migration guide markdown ("-" reads stdin)
+  --vendor <name>  Vendor name, e.g. openai
+  --sdk <pkg>      npm package name, e.g. openai
+  --from <n>       SDK major version being migrated FROM
+  --to <n>         SDK major version being migrated TO
+  --api-from <s>   API version string before (optional)
+  --api-to <s>     API version string after (optional)
+  --id <trackId>   Track id (default: <vendor>-v<from>-to-v<to>)
+  --guide-url <u>  Source URL recorded on every rule
+  --repo <path>    Smoke-test the generated rules on a real repo (scan only)
+  --max-rules <n>  Cap on generated rules (default 25)
+  --write          Merge the track into .migratepr.json
+  --json           Print the raw track JSON
+  -h, --help       Show this help
+
+Requires an LLM provider: set ANTHROPIC_API_KEY / OPENAI_API_KEY / GROQ_API_KEY /
+MISTRAL_API_KEY / DEEPSEEK_API_KEY / OPENROUTER_API_KEY, or have Ollama running.
+`);
+}
+
+async function runRulegen(argv: string[]): Promise<number> {
+  let args: RulegenArgs;
+  try {
+    args = parseRulegenArgs(argv);
+  } catch (err) {
+    console.error(red((err as Error).message));
+    rulegenUsage();
+    return EXIT.USAGE;
+  }
+  if (args.help) return rulegenUsage(), EXIT.OK;
+
+  let guideText: string;
+  try {
+    guideText = args.guide === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(args.guide, 'utf8');
+  } catch (err) {
+    console.error(red(`cannot read guide: ${(err as Error).message}`));
+    return EXIT.USAGE;
+  }
+
+  const provider = await makeLlmProvider();
+  if (!provider) {
+    console.error(
+      red('no LLM provider available — set ANTHROPIC_API_KEY, OPENAI_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY, DEEPSEEK_API_KEY or OPENROUTER_API_KEY, or start Ollama'),
+    );
+    return EXIT.USAGE;
+  }
+
+  console.log(dim(`rulegen: extracting rules from ${args.guide} via ${provider.name}…`));
+  const { track, raw, warnings } = await generateRulesFromGuide({
+    guideText,
+    vendor: args.vendor,
+    sdkModule: args.sdk,
+    sdkFrom: args.from,
+    sdkTo: args.to,
+    apiFrom: args.apiFrom ?? `v${args.from}`,
+    apiTo: args.apiTo ?? `v${args.to}`,
+    trackId: args.id,
+    guideUrl: args.guideUrl,
+    provider,
+    maxRules: args.maxRules,
+  });
+
+  if (args.json) {
+    console.log(JSON.stringify({ track, raw, warnings }, null, 2));
+    return EXIT.OK;
+  }
+
+  console.log(bold(`Track: ${track.id} — ${track.rules.length} rules`));
+  for (const w of warnings) console.log(yellow(`· ${w}`));
+  for (const r of track.rules) {
+    console.log(`  ${r.kind.padEnd(18)} ${r.id}  ${dim(r.summary)}`);
+  }
+
+  if (args.repo) {
+    console.log('');
+    console.log(bold(`Smoke test against ${args.repo}:`));
+    const hits = smokeTestTrack(track, args.repo);
+    if (hits.length === 0) {
+      console.log(yellow('  no findings — the generated rules matched nothing in that repo'));
+    } else {
+      for (const h of hits) {
+        console.log(`  ${green(String(h.findings).padStart(3))} finding(s)  ${h.ruleId}  ${dim(h.sampleFile ?? '')}`);
+      }
+    }
+  }
+
+  if (args.write) {
+    const cfgPath = '.migratepr.json';
+    const { config } = loadConfig('.');
+    const tracks = [...(config.tracks ?? []).filter(t => t.id !== track.id), track];
+    const out = JSON.stringify({ ...config, tracks }, null, 2) + '\n';
+    fs.writeFileSync(cfgPath, out, 'utf8');
+    console.log(`\n${green('written')} — ${track.id} merged into ${cfgPath}`);
+  }
+  return EXIT.OK;
+}
+
+/* ------------------------------- github-app ------------------------------- */
+
+function runGithubApp(argv: string[]): number {
+  let name = 'migratepr';
+  let url = 'https://github.com/trajectiq-ai/migratepr';
+  let hookUrl: string | undefined;
+  let help = false;
+  const needValue = (flag: string): string => {
+    const v = argv[++i];
+    if (v === undefined) throw new Error(`missing value for ${flag}`);
+    return v;
+  };
+  let i = 0;
+  for (; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--name') name = needValue(a);
+    else if (a === '--url') url = needValue(a);
+    else if (a === '--hook-url') hookUrl = needValue(a);
+    else if (a === '--help' || a === '-h') help = true;
+    else throw new Error(`unknown github-app flag: ${a}`);
+  }
+  if (help) {
+    console.log(`migratepr github-app — create the MigratePR GitHub App
+
+Usage:
+  migratepr github-app [--name <app>] [--url <homepage>] [--hook-url <https-url>]
+
+Prints a GitHub App manifest. To create the app:
+  1. Run this command and copy the JSON.
+  2. Open https://github.com/settings/apps/new and paste the manifest (or
+     POST it to github.com/settings/apps/new with a form field url=...).
+  3. GitHub returns a temporary code; exchange it for the app's credentials
+     via POST /app-manifests/<code>/conversions.
+  4. Store the app id + private key + webhook secret, and wire the webhook
+     URL to your MigratePR server. The server verifies every delivery with
+     X-Hub-Signature-256 (HMAC-SHA256) before acting.
+
+The manifest requests: read code, write PRs, write checks. Events: push
+(default branch) and pull_request (so the bot ignores its own PRs).
+`);
+    return EXIT.OK;
+  }
+  const manifest = buildAppManifest({ name, url, hookUrl });
+  console.log(JSON.stringify(manifest, null, 2));
+  return EXIT.OK;
 }
 
 /* ------------------------------- watch mode ------------------------------- */

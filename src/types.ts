@@ -2,9 +2,11 @@
 
 export type RuleKind =
   | 'method-rename'
+  | 'method-move'
   | 'param-rename'
   | 'api-version'
   | 'mock-method-key'
+  | 'client-constructor'
   | 'sdk-bump';
 export type RiskLevel = 'mechanical' | 'review-recommended' | 'semantic';
 
@@ -30,6 +32,30 @@ export interface MethodRenameRule extends RuleBase {
   kind: 'method-rename';
   /** Property chain preceding the method, e.g. 'subscriptions'. */
   resource: string;
+  from: string;
+  to: string;
+}
+
+/**
+ * Move a client-level method into a namespaced resource (OpenAI v3 → v4 style),
+ * e.g. openai.createCompletion( → openai.completions.create(.
+ */
+export interface MethodMoveRule extends RuleBase {
+  kind: 'method-move';
+  /** Resource chain the method currently hangs off ('' = the client itself). */
+  fromResource: string;
+  from: string;
+  /** Full target chain, e.g. 'completions.create'. */
+  to: string;
+}
+
+/**
+ * Client construction change, e.g. new OpenAIApi(config) → new OpenAI({ apiKey })
+ * in openai v3 → v4. Always needs the guide-constrained LLM engine: the config
+ * object must be reshaped, which rules cannot do deterministically.
+ */
+export interface ClientConstructorRule extends RuleBase {
+  kind: 'client-constructor';
   from: string;
   to: string;
 }
@@ -84,9 +110,11 @@ export interface SdkBumpRule extends RuleBase {
 
 export type MigrationRule =
   | MethodRenameRule
+  | MethodMoveRule
   | ParamRenameRule
   | ApiVersionRule
   | MockMethodKeyRule
+  | ClientConstructorRule
   | SdkBumpRule;
 
 /** Pluggable LLM backend for rewrites that rules cannot express. */
@@ -171,6 +199,18 @@ export interface VerifyResult {
   durationMs: number;
 }
 
+/**
+ * One extra verify gate (e.g. typecheck/build/lint) run at both stages.
+ * Only gates whose script exists in the repo's package.json run; the rest
+ * are skipped with a log note.
+ */
+export interface GateResult {
+  name: string;
+  command: string;
+  baseline: VerifyResult;
+  post: VerifyResult;
+}
+
 export interface PrPayload {
   branch: string;
   base: string;
@@ -199,6 +239,8 @@ export interface MigrateReport {
   post: VerifyResult | null;
   diff: string | null;
   pr: PrPayload | null;
+  /** Extra verify gates (typecheck/build/lint) run at both stages. */
+  gates?: GateResult[];
 }
 
 export interface VerifyFnInput {
@@ -232,6 +274,8 @@ export interface MigrateprConfig {
   install?: boolean;
   /** Base branch for PRs (default: the branch HEAD had before delivery). */
   prBase?: string;
+  /** Extra verify gates (npm script names, e.g. typecheck/build/lint). */
+  verifyGates?: string[];
 }
 
 export interface MigrateOptions {
@@ -256,6 +300,8 @@ export interface MigrateOptions {
   requireGit?: boolean;
   /** Base branch override for PR delivery. */
   prBase?: string;
+  /** Extra verify gates (npm script names, e.g. typecheck/build/lint). */
+  verifyGates?: string[];
   /** Echo non-fatal progress lines into the report/logs. */
   verbose?: boolean;
 }

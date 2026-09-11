@@ -47,15 +47,17 @@ migratepr --repo path/to/repo --json
 migratepr --repo path/to/repo --push
 ```
 
-Track auto-detection: the pinned SDK major in `package.json` picks the track
-(`stripe@^12` → `stripe-v12-to-v13`, `express@^4` → `express-v4-to-v5`).
+Track auto-detection is vendor-driven: the pinned SDK major in `package.json`
+picks the track (`stripe@^12` → `stripe-v12-to-v13`, `express@^4` →
+`express-v4-to-v5`, `openai@^3` → `openai-v3-to-v4`).
 `migratepr --list-tracks` shows all supported upgrade paths.
 
 | Track | SDK upgrade | What gets rewritten |
 |---|---|---|
 | `stripe-v12-to-v13` | stripe ^12 → ^13 | `subscriptions.del()` → `cancel()`, `shipping_rates` → `shipping_options` reshape, API pin, Jest mocks, test assertions |
 | `stripe-v17-to-v18` | stripe ^17 → ^18 | Upcoming Invoice API → Create Preview (`retrieveUpcoming` → `createPreview`), API pin |
-| `express-v4-to-v5` | express ^4 → ^5 | `app.del()` → `app.delete()`, Express mocks, SDK bump |
+| `express-v4-to-v5` | express ^4 → ^5 | `app.del()` → `app.delete()`, route wildcards, Express mocks, SDK bump |
+| `openai-v3-to-v4` | openai ^3 → ^4 | 10 flat methods → namespaced resources (`createChatCompletion` → `chat.completions.create`, `createEmbedding` → `embeddings.create`, …), client constructor (LLM), SDK bump |
 
 ## Custom tracks — the JSON rule DSL
 
@@ -92,9 +94,12 @@ watch) picks them up. Custom tracks override built-ins with the same id.
 }
 ```
 
-Rule kinds: `method-rename` (resource + from/to), `param-rename` (optional
-`method`, `wrapTemplate` value reshape), `api-version` (from/to pin),
-`mock-method-key` (test doubles), and `sdk-bump` (package.json range).
+Rule kinds: `method-rename` (resource + from/to), `method-move` (flat client
+method → a namespaced chain, e.g. `createChatCompletion` →
+`chat.completions.create`), `param-rename` (optional `method`, `wrapTemplate`
+value reshape), `api-version` (from/to pin), `mock-method-key` (test doubles),
+`client-constructor` (construction shape change — `needsLlm: true`), and
+`sdk-bump` (package.json range).
 `resource` is the property chain before the method (`'subscriptions'` for
 `stripe.subscriptions.del`); leave it `""` when the client itself is the
 resource (e.g. `app.del(...)`). `risk` is `mechanical` | `review-recommended`
@@ -131,6 +136,74 @@ the loop resumes watching normally.
 `.github/workflows/migratepr-watch.yml`. It runs daily on GitHub Actions, skips
 when a migration PR is already open, and opens the next PR with `GITHUB_TOKEN`
 — zero extra secrets for public repos.
+
+## Verify gates — prove it with your own tooling
+
+The test suite is the primary gate, but repos have stricter contracts. Extra
+gates run at **both** stages — before any rewrite and after — and a failure
+aborts and reverts:
+
+```bash
+migratepr --repo path/to/repo --gate typecheck --gate lint
+```
+
+Or in `.migratepr.json`: `"verifyGates": ["typecheck", "lint"]`. Each gate is an
+npm script. Failing **before** the migration means the repo was already broken →
+nothing is touched. Failing **after** means MigratePR broke it → every file is
+restored byte-for-byte. A gate whose script does not exist is skipped with a
+logged note (never a silent pass). Results appear in the report (`gates[]`) and
+in the web app's job view.
+
+## AI rule generation — turn a migration guide into rules
+
+The rule library is the moat, so generating rules should be cheap. `rulegen`
+reads an official vendor migration guide (markdown), asks the LLM engine for a
+rule set, and **validates it through the exact same schema as
+`.migratepr.json`** — an LLM draft never ships unvalidated.
+
+```bash
+# Generate and print (validated) rules; --write merges into .migratepr.json
+migratepr rulegen --guide docs/v2-migration.md \
+  --vendor acme --sdk @acme/sdk --from 1 --to 2 --json
+
+# Smoke-test the draft against a real repo: which rules actually match code?
+migratepr rulegen --guide docs/v2-migration.md --vendor acme \
+  --sdk @acme/sdk --from 1 --to 2 --repo path/to/repo
+```
+
+Workflow: generate → review the JSON → smoke-test against a real repo →
+`--write` → run the normal pipeline. Try it with **zero API keys** using the
+included guide (local Ollama):
+
+```bash
+migratepr rulegen --guide examples/rulegen-guide-express.md \
+  --vendor express --sdk express --from 4 --to 5
+```
+
+Guardrails: removals with no mechanical equivalent are deliberately skipped
+(never fabricated), rules with unknown kinds are dropped with a warning rather
+to fail a whole draft, `sdk-bump` rules targeting the wrong package are dropped,
+and the output is accepted in any of the shapes models emit (`{"rules": …}`, a
+bare array, or a full track envelope).
+
+## GitHub App — the hosted self-maintaining service
+
+The watch loop and the scheduled workflow need no server. For a multi-repo
+service, MigratePR ships the code-level pieces of a GitHub App:
+
+```bash
+migratepr github-app --name migratepr --url https://your-host --hook-url https://your-host/webhook
+```
+
+It prints a **GitHub App manifest** (paste it at `github.com/settings/apps/new`
+to create the app in one step) with minimal scope — read code, write PRs, write
+checks — subscribed to `push` and `pull_request`.
+
+`src/github-app.ts` also provides the two server-side primitives: **timing-safe
+HMAC-SHA256 webhook verification** (`X-Hub-Signature-256`) and the **event
+router** that decides whether a delivery warrants a migration run — a push to
+the default branch that touched dependency files, or a scheduled sweep. PR
+events are ignored so the loop never reacts to its own pull requests.
 
 ## Web app (register · login · run migrations · manage AI keys)
 
@@ -183,6 +256,7 @@ The `--repo` path may be relative or absolute.
 | `--skip-rule <id>` | — | Skip a rule id (repeatable) |
 | `--install` / `--no-install` | `--no-install` | Run `npm install` after dependency bumps |
 | `--verify-command <c>` | repo's test script | Override the verify command |
+| `--gate <name>` | — | Extra npm-script gate run before *and* after migration (repeatable) |
 | `--timeout <ms>` | 600000 | Per-run verify timeout (timeout ⇒ exit code 124 recorded) |
 | `--require-git` | off | Refuse to run outside a git checkout |
 | `--pr-base <branch>` | branch HEAD had | Base branch for the PR |
@@ -197,6 +271,15 @@ The `--repo` path may be relative or absolute.
 | `2` | Diff-review — repo has no runnable test suite; nothing was attempted |
 | `3` | Usage or configuration error |
 
+### Subcommands
+
+| Command | What it does |
+|---|---|
+| `migratepr` | One migration run (flags above) |
+| `migratepr watch` | Self-maintaining loop over one or more repos |
+| `migratepr rulegen` | Generate + validate rules from an official migration guide |
+| `migratepr github-app` | Print the GitHub App manifest |
+
 ## Configuration: `.migratepr.json`
 
 Commit one to the repo so everyone (and CI) gets the same behavior. Unknown keys are ignored (forward-compatible); precedence is **CLI flag > config file > default**.
@@ -209,6 +292,7 @@ Commit one to the repo so everyone (and CI) gets the same behavior. Unknown keys
   "exclude": ["generated/", "**/*.gen.ts"],
   "skipRules": ["stripe-v12-to-v13:checkout-shipping-options"],
   "verifyCommand": "make test",       // optional override
+  "verifyGates": ["typecheck"],        // npm scripts run before AND after
   "verifyTimeoutMs": 600000,
   "install": false,
   "prBase": "main"
