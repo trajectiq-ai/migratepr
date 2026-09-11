@@ -16,6 +16,8 @@ import { MistralProvider } from './providers/mistral';
 import { DeepSeekProvider } from './providers/deepseek';
 import { OpenRouterProvider } from './providers/openrouter';
 import { OllamaProvider, isOllamaAvailable } from './providers/ollama';
+import { OpenAiCompatibleProvider } from './providers/openai-compatible';
+import { readDefaultProvider } from './doctor';
 
 /** All supported providers, in priority order for auto-detection. */
 export const SUPPORTED_LLM_PROVIDERS = [
@@ -42,8 +44,9 @@ const PROVIDER_ENV_KEYS: Array<[SupportedLlmProvider, string]> = [
 
 export const NO_PROVIDER_HINT =
   'no LLM provider configured (set ANTHROPIC_API_KEY, OPENAI_API_KEY, GROQ_API_KEY, '
-  + 'MISTRAL_API_KEY, DEEPSEEK_API_KEY or OPENROUTER_API_KEY — or start Ollama for fully-local rewrites; '
-  + 'force a provider with MIGRATEPR_LLM_PROVIDER)';
+  + 'MISTRAL_API_KEY, DEEPSEEK_API_KEY or OPENROUTER_API_KEY, point MIGRATEPR_BASE_URL at any '
+  + 'OpenAI-compatible endpoint, or start Ollama for fully-local rewrites — run "migratepr doctor" '
+  + 'to detect local runtimes automatically; force a provider with MIGRATEPR_LLM_PROVIDER)';
 
 function buildProvider(name: string): LlmProvider | null {
   switch (name) {
@@ -59,20 +62,58 @@ function buildProvider(name: string): LlmProvider | null {
 }
 
 /**
+ * Generic OpenAI-compatible endpoint — LM Studio, llama.cpp, vLLM, LocalAI,
+ * Jan, KoboldCpp, LiteLLM, Azure OpenAI, or a company gateway. Anything that
+ * speaks /v1/chat/completions works with no code changes. Configured by env
+ * (MIGRATEPR_BASE_URL / MIGRATEPR_MODEL / MIGRATEPR_API_KEY) or by a default
+ * saved from `migratepr doctor`. Not part of the named registry because it has
+ * no key or signup of its own.
+ */
+export function buildCustomProvider(
+  opts: { baseUrl?: string; model?: string; apiKey?: string } = {},
+): LlmProvider | null {
+  const raw = (opts.baseUrl ?? process.env.MIGRATEPR_BASE_URL ?? '').trim().replace(/\/+$/, '');
+  if (!raw) return null;
+  // Accept both "http://host:port" and "http://host:port/v1".
+  const baseUrl = /\/v\d+$/.test(raw) ? `${raw}/chat/completions` : `${raw}/v1/chat/completions`;
+  return new OpenAiCompatibleProvider({
+    name: 'custom',
+    baseUrl,
+    apiKey: opts.apiKey ?? process.env.MIGRATEPR_API_KEY,
+    defaultModel: (opts.model ?? process.env.MIGRATEPR_MODEL ?? '').trim() || 'local-model',
+    timeoutMs: 300_000,
+    attempts: 1,
+  });
+}
+
+/**
  * Pick the LLM provider for this run.
  *
- * Priority: an explicit MIGRATEPR_LLM_PROVIDER wins (validated — fail loudly
- * on unknown names or unreachable Ollama); then the first cloud key present;
- * then a local Ollama server if one is reachable (zero-config local mode);
- * otherwise null (rules engine only).
+ * Priority:
+ *   1. explicit MIGRATEPR_LLM_PROVIDER (validated — fails loudly)
+ *   2. a cloud API key present in the environment
+ *   3. MIGRATEPR_BASE_URL (any OpenAI-compatible endpoint)
+ *   4. the default saved by `migratepr doctor` at install time
+ *   5. a reachable local Ollama (zero-config)
+ *   6. null — rules engine only, which needs no LLM
  */
 export async function makeLlmProvider(): Promise<LlmProvider | null> {
   const forced = process.env.MIGRATEPR_LLM_PROVIDER?.trim().toLowerCase();
   if (forced) {
+    if (forced === 'custom') {
+      const custom = buildCustomProvider();
+      if (!custom) {
+        throw new Error(
+          'MIGRATEPR_LLM_PROVIDER=custom needs MIGRATEPR_BASE_URL (e.g. http://127.0.0.1:1234/v1)',
+        );
+      }
+      return custom;
+    }
     const provider = buildProvider(forced);
     if (!provider) {
       throw new Error(
-        `Unknown MIGRATEPR_LLM_PROVIDER '${forced}' — supported: ${SUPPORTED_LLM_PROVIDERS.join(', ')}`,
+        `Unknown MIGRATEPR_LLM_PROVIDER '${forced}' — supported: ${SUPPORTED_LLM_PROVIDERS.join(', ')}, `
+        + `or 'custom' with MIGRATEPR_BASE_URL`,
       );
     }
     if (forced === 'ollama' && !(await isOllamaAvailable())) {
@@ -84,6 +125,24 @@ export async function makeLlmProvider(): Promise<LlmProvider | null> {
 
   for (const [name, envVar] of PROVIDER_ENV_KEYS) {
     if (process.env[envVar]) return buildProvider(name);
+  }
+
+  // Explicit generic endpoint beats a saved default (same specificity as a key).
+  const fromEnv = buildCustomProvider();
+  if (fromEnv) return fromEnv;
+
+  // A default saved by `migratepr doctor` (install-time discovery).
+  const saved = readDefaultProvider();
+  if (saved) {
+    if (saved.provider === 'custom') {
+      const custom = buildCustomProvider({ baseUrl: saved.baseUrl, model: saved.model });
+      if (custom) return custom;
+    } else if (saved.provider === 'ollama') {
+      if (await isOllamaAvailable()) return new OllamaProvider(saved.model);
+    } else {
+      const named = buildProvider(saved.provider);
+      if (named) return named;
+    }
   }
 
   // Zero-config local fallback: a running Ollama counts as configured.

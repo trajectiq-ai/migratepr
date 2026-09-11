@@ -6,6 +6,7 @@ import { watchCycle, watchLoop, WatchRepo, WatchResult } from './watch';
 import { generateRulesFromGuide, smokeTestTrack } from './rulegen';
 import { makeLlmProvider } from './engine';
 import { buildAppManifest } from './github-app';
+import { runDoctor, formatDoctorReport, DoctorReport } from './doctor';
 import { loadConfig } from './config';
 import { bold, cyan, dim, green, red, yellow } from './ansi';
 
@@ -95,8 +96,11 @@ function usage(): void {
   console.log(`migratepr v${VERSION} — test-verified migration PRs for third-party API changes
 
 Usage:
+  migratepr doctor [--json]                 # detect local LLMs and set a default
   migratepr --repo <path> [options]
   migratepr watch --repo <path> [options]   # self-maintaining loop
+  migratepr rulegen --guide <file> …        # migration guide → validated rules
+  migratepr github-app [--hook-url <url>]   # print the GitHub App manifest
 
 Flags:
   --repo <path>        Target repository (default: .)
@@ -138,6 +142,9 @@ async function main(): Promise<number> {
   }
   if (argv[0] === 'github-app') {
     return runGithubApp(argv.slice(1));
+  }
+  if (argv[0] === 'doctor') {
+    return runDoctorCli(argv.slice(1));
   }
   let args: ParsedArgs;
   try {
@@ -485,6 +492,67 @@ The manifest requests: read code, write PRs, write checks. Events: push
   }
   const manifest = buildAppManifest({ name, url, hookUrl });
   console.log(JSON.stringify(manifest, null, 2));
+  return EXIT.OK;
+}
+
+/* --------------------------------- doctor --------------------------------- */
+
+function doctorUsage(): void {
+  console.log(`migratepr doctor — find an LLM on this machine and make it the default
+
+Usage:
+  migratepr doctor [--json] [--set-default <id>] [--no-write]
+
+Scans for local OpenAI-compatible runtimes (Ollama, LM Studio, Jan, llama.cpp,
+vLLM, LocalAI, GPT4All, KoboldCpp, text-generation-webui) and for cloud API
+keys already in the environment. The best option found is saved as the default
+provider so later runs need no configuration. With nothing installed, doctor
+prints free options with exact commands — starting with the zero-dependency
+answer: the deterministic rules engine needs no LLM at all.
+
+Flags:
+  --json                 Print the full JSON report
+  --set-default <id>     Force a provider/runtime id (e.g. ollama, groq, custom)
+  --no-write             Detect and report only; do not save a default
+  -h, --help             Show this help
+`);
+}
+
+async function runDoctorCli(argv: string[]): Promise<number> {
+  let json = false;
+  let write = true;
+  let setDefault: string | undefined;
+  let help = false;
+  const needValue = (flag: string): string => {
+    const v = argv[++i];
+    if (v === undefined) throw new Error(`missing value for ${flag}`);
+    return v;
+  };
+  let i = 0;
+  for (; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--json') json = true;
+    else if (a === '--no-write') write = false;
+    else if (a === '--set-default') setDefault = needValue(a);
+    else if (a === '--help' || a === '-h') help = true;
+    else throw new Error(`unknown doctor flag: ${a}`);
+  }
+  if (help) return doctorUsage(), EXIT.OK;
+
+  let report: DoctorReport;
+  try {
+    report = await runDoctor({ write, setDefault });
+  } catch (err) {
+    console.error(red((err as Error).message));
+    return EXIT.USAGE;
+  }
+
+  if (json) {
+    console.log(JSON.stringify(report, null, 2));
+    return EXIT.OK;
+  }
+
+  console.log(formatDoctorReport(report));
   return EXIT.OK;
 }
 

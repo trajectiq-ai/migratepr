@@ -43,19 +43,22 @@ export function pickPreferredOllamaModel(installed: string[]): string {
 
 export class OllamaProvider extends OpenAiCompatibleProvider {
   private modelResolved = false;
+  /** Model pinned by the caller (e.g. a `migratepr doctor` default). */
+  private readonly pinnedModel: string | null;
 
-  constructor() {
+  constructor(model?: string) {
     const host = (process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434').replace(/\/+$/, '');
     super({
       name: 'ollama',
       baseUrl: `${host}/v1/chat/completions`,
       apiKey: process.env.OLLAMA_API_KEY, // optional — Ollama itself needs none
-      defaultModel: OLLAMA_DEFAULT_MODEL,
+      defaultModel: model?.trim() || OLLAMA_DEFAULT_MODEL,
       modelEnvVar: 'MIGRATEPR_OLLAMA_MODEL',
       extraBody: { options: { temperature: 0, num_ctx: 16384 } },
       timeoutMs: 300_000, // local hardware can be slow on first model load
       attempts: 1, // no rate limits locally; retrying a half-loaded model just adds delay
     });
+    this.pinnedModel = model?.trim() || null;
   }
 
   async complete(system: string, prompt: string): Promise<string> {
@@ -68,6 +71,7 @@ export class OllamaProvider extends OpenAiCompatibleProvider {
 
   /** Explicit override wins; otherwise prefer the default, then best installed. */
   private async pickInstalledModel(): Promise<string | null> {
+    if (this.pinnedModel) return null; // caller pinned a model — respect it
     if (process.env.MIGRATEPR_OLLAMA_MODEL) return null; // base class uses it
     const host = (process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434').replace(/\/+$/, '');
     try {

@@ -276,6 +276,7 @@ The `--repo` path may be relative or absolute.
 | Command | What it does |
 |---|---|
 | `migratepr` | One migration run (flags above) |
+| `migratepr doctor` | Detect local LLMs, save a default, or print free setup options |
 | `migratepr watch` | Self-maintaining loop over one or more repos |
 | `migratepr rulegen` | Generate + validate rules from an official migration guide |
 | `migratepr github-app` | Print the GitHub App manifest |
@@ -323,6 +324,50 @@ The PR body includes the verification receipt (baseline green, post-migration gr
 - **Verify timeout:** hung suites are killed (exit 124 in the report) instead of hanging your CI.
 - **LLM output validation:** required change present + syntax parse, then the test gate. Fenced markdown output is tolerated; everything else is rejected.
 
+## Finding an LLM automatically (`migratepr doctor`)
+
+Install MigratePR on a machine you have never seen and you should not be interrogated about model choices. `migratepr doctor` scans the system and configures itself:
+
+```bash
+migratepr doctor               # detect, then save the best option as the default
+migratepr doctor --json        # machine-readable (for installers)
+migratepr doctor --set-default ollama
+migratepr doctor --no-write    # report only
+```
+
+What it does:
+
+1. **Probes local runtimes** in parallel on their well-known ports — Ollama (`:11434`), LM Studio (`:1234`), Jan (`:1337`), llama.cpp (`:8080`), vLLM (`:8000`), LocalAI, GPT4All, KoboldCpp, text-generation-webui — and lists the models each one has.
+2. **Flags runtimes that are installed but stopped** (binary on `PATH`, nothing listening), so the fix is one command rather than a reinstall.
+3. **Checks the environment** for cloud API keys that are already set.
+4. **Saves the best option as the default** (`data/llm.json`) so every later run — CLI, watch loop, web app — works with no configuration.
+5. **If nothing is found**, prints free options with exact copy-pasteable commands, ordered by effort.
+
+Example on a machine with Ollama running:
+
+```text
+Local runtimes
+  ✔ Ollama      http://127.0.0.1:11434/v1  12 model(s) · using qwen3:8b
+  ! LM Studio   installed but not running
+
+Effective provider
+  ollama · qwen3:8b — saved default (detected ollama)
+```
+
+When nothing is available, doctor recommends the following — and **option 1 is genuinely sufficient**:
+
+| Option | Cost | Effort | Privacy |
+|---|---|---|---|
+| **1. Do nothing** — deterministic rules engine | free | none | code never leaves the machine |
+| **2. Groq** free tier | free | one key, no install | affected files sent to Groq |
+| **3. OpenRouter** free models | free | one key, no install | affected files sent to OpenRouter |
+| **4. Ollama** | free | one install (~4.7 GB) | **nothing leaves the machine** |
+| **5. Your own endpoint** via `MIGRATEPR_BASE_URL` | varies | already have it | your infrastructure |
+
+Most migrations are mechanical, so MigratePR needs no LLM at all: the model is only consulted for changes a rule cannot express, and those findings are *skipped* — never guessed — when no provider is configured. Doctor says so plainly rather than pressuring the customer into a download.
+
+Discovery never installs anything, never sends data anywhere, and never writes a credential — only a provider name, a base URL, and a model name.
+
 ## LLM engine
 
 Deterministic rules handle most migrations. For what they can't express, configure a provider and use `--engine llm` (or `auto`). Seven providers are supported:
@@ -336,6 +381,7 @@ Deterministic rules handle most migrations. For what they can't express, configu
 | **DeepSeek** | `DEEPSEEK_API_KEY` | `deepseek-coder` | `MIGRATEPR_DEEPSEEK_MODEL` |
 | **OpenRouter** | `OPENROUTER_API_KEY` | `anthropic/claude-sonnet-4.5` | `MIGRATEPR_OPENROUTER_MODEL` |
 | **Ollama (local)** | no key — just run `ollama serve` | auto-picked (see below) | `MIGRATEPR_OLLAMA_MODEL` |
+| **Any OpenAI-compatible endpoint** | `MIGRATEPR_BASE_URL` (+ optional `MIGRATEPR_API_KEY`) | `MIGRATEPR_MODEL` | — |
 
 ```bash
 # cloud: any one key is enough
@@ -354,7 +400,7 @@ migratepr --repo . --engine llm
 - The best installed model is auto-picked (code-tuned models preferred). Force one with `MIGRATEPR_OLLAMA_MODEL`
 - Force provider selection explicitly with `MIGRATEPR_LLM_PROVIDER` (one of: `anthropic`, `openai`, `groq`, `mistral`, `deepseek`, `openrouter`, `ollama`)
 
-Provider priority with multiple keys set: Anthropic → OpenAI → Groq → Mistral → DeepSeek → OpenRouter → local Ollama. The web app's key manager supports every provider above (with live "Test" checks, including Ollama reachability and model listing).
+Provider priority: explicit `MIGRATEPR_LLM_PROVIDER` → first cloud key present (Anthropic → OpenAI → Groq → Mistral → DeepSeek → OpenRouter) → `MIGRATEPR_BASE_URL` → the default saved by `migratepr doctor` → a reachable local Ollama → none (rules engine only). The web app's key manager supports every named provider above (with live "Test" checks, including Ollama reachability and model listing).
 
 Prompts are constrained by the rule's official guide excerpt; requests have per-attempt timeouts and exponential backoff on 429/5xx.
 
